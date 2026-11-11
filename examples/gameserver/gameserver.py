@@ -1,0 +1,940 @@
+from math import asin, cos, radians, sin, sqrt
+
+from datadivr import BackgroundTasks, app
+from datadivr.handlers.registry import HandlerType, websocket_handler
+from datadivr.transport.messages import create_message, send_message
+from datadivr.transport.models import WebSocketMessage
+from datadivr.transport.server import clients, get_client_state, update_client_state
+from datadivr.utils.logging import get_logger, setup_logging
+from fastapi.responses import HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi import  Request
+import json
+import string
+import random
+import shutil
+from fastapi import File, Form, UploadFile, Request, FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from os import listdir
+from fastapi import BackgroundTasks as FABackgroundTask
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
+from pydantic import EmailStr, BaseModel
+
+# Initialize logging first, before getting the logger
+setup_logging()
+logger = get_logger(__name__)
+
+
+
+import os
+
+
+from dotenv import load_dotenv
+load_dotenv()
+
+global taskdata
+taskdata = {"tasks":[]}
+userdb = {}
+serverURL = ""
+serverWS = ""
+localserver = True
+
+storage_path = os.getenv("PERSISTANT_PATH", "examples/gameserver/")
+
+### ADMIN
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "supersecret123")
+
+userskin_path = ""
+tasks_path = ""
+tracks_path = ""
+
+if storage_path != "examples/gameserver/":
+    localserver = False
+print("we use:", storage_path)
+
+if localserver:
+    userskin_path = "userskins"
+else:
+    userskin_path = os.path.join(storage_path, "userskins")
+
+tasks_path =  os.path.join(storage_path,  'tasks') 
+tracks_path = os.path.join(storage_path,  'tracks') 
+
+# debug open /storage, list all files, print
+persistantFiles = os.listdir(storage_path)
+print(persistantFiles)
+if "users.json" not in persistantFiles:
+    print("not found")
+    with open(storage_path + 'users.json', 'w') as f:
+        data = {"users":[]}
+        json.dump(data, f)
+
+if os.path.isdir(userskin_path):
+    print(os.listdir(userskin_path))
+else:
+    print("Skins Doesn't exists")
+    os.mkdir(userskin_path)
+
+
+    #os.mkdir(tasks_path)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+source_tasks = os.path.join(BASE_DIR, "tasks")
+if not os.path.exists(tasks_path) or not os.listdir(tasks_path):
+    print("tasks missing or empty → copying files")
+    os.makedirs(tasks_path, exist_ok=True)
+    shutil.copytree(source_tasks, tasks_path, dirs_exist_ok=True)
+    print("after copy:", os.listdir(tasks_path))
+else:
+    print("tasks already exist:", os.listdir(tasks_path))
+
+print("SOURCE:", source_tasks)
+print("SOURCE EXISTS:", os.path.exists(source_tasks))
+print("DEST:", tasks_path)
+
+
+if os.path.isdir(tracks_path):
+    print(os.listdir(tracks_path))
+else:
+    print("tasks Doesn't exists")
+    os.mkdir(tracks_path)
+
+print("Serving userskins from:", userskin_path)
+print("Absolute path:", os.path.abspath(userskin_path))
+print("Files:", os.listdir(userskin_path))
+
+
+if localserver:
+    serverURL = "http://127.0.0.1:8765"
+    serverWS = "ws://localhost:8765/ws"
+else:
+    serverURL = "https://cloudbase.lab.lbi-netmed.com"
+    serverWS = "wss://cloudbase.lab.lbi-netmed.com/ws"
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/userskins", StaticFiles(directory=userskin_path), name="userskins")
+templates = Jinja2Templates(directory="templates")
+
+#task_dir = os.path.join(os.path.dirname(__file__),  'tasks')
+taskfiles = os.listdir(tasks_path)
+
+'''
+for t in taskfiles:
+    with open(tasks_path +'/' + t, 'r', encoding='utf-8') as f:
+        #global userdb 
+        thistask = json.load(f)
+        if "track" not in thistask:
+            thistask["track"] = 'none'
+        if "tracks" not in thistask:
+            thistask["tracks"] = []
+        #print(thistask)
+
+        taskdata["tasks"].append(thistask)
+        f.close()
+'''
+def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
+    return ''.join(random.choice(chars) for _ in range(size))
+
+def load_userdb():
+    import os, json
+    users_file = os.path.join(storage_path, "users.json")
+    try:
+        with open(users_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"users": []}
+
+
+def searchUser(name, pw):
+    userdb = load_userdb()
+    for user in userdb["users"]:
+        if user["name"] == name and user["pw"] == pw:
+            return user
+    return None
+
+def getUser(name):
+    userdb = load_userdb()
+    for user in userdb["users"]:
+        if user["name"] == name:
+            return user
+    return None
+
+
+def reload_tasks():
+    taskdata["tasks"] = []
+    
+    for t in os.listdir(tasks_path):
+        with open(os.path.join(tasks_path, t), 'r', encoding='utf-8') as f:
+            thistask = json.load(f)
+
+            if "track" not in thistask:
+                thistask["track"] = 'none'
+            if "tracks" not in thistask:
+                thistask["tracks"] = []
+
+            taskdata["tasks"].append(thistask)
+     
+
+# example messages
+# {"event_name": "GAMESERVER_SET_NAME", "to": "others", "payload": {"name": "CLI" } }
+# {"event_name": "GAMESERVER_INFO_UPDATE", "to": "others", "payload": {"latitude": 48.23747967660676, "longitude": 16.416320800781254, "altitude": 500, "direction": 90}}
+
+
+def is_within_range(lat1: float, lon1: float, lat2: float, lon2: float, max_range_km: float = 100.0) -> bool:
+    """
+    Determine if two geographical points are within a specified range.
+
+    This function calculates the great-circle distance between two points
+    on the Earth's surface given their latitude and longitude in degrees.
+    It returns True if the distance is less than or equal to the specified
+    maximum range in kilometers.
+
+    Parameters:
+    - lat1 (float): Latitude of the first point in degrees.
+    - lon1 (float): Longitude of the first point in degrees.
+    - lat2 (float): Latitude of the second point in degrees.
+    - lon2 (float): Longitude of the second point in degrees.
+    - max_range_km (float): Maximum range in kilometers. Default is 10.0 km.
+
+    Returns:
+    - bool: True if the distance between the two points is within the specified range, False otherwise.
+    """
+    lat1, lon1 = radians(lat1), radians(lon1)
+    lat2, lon2 = radians(lat2), radians(lon2)
+    R = 6371.0
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    distance = R * c
+    return distance <= max_range_km
+
+# This shows where the terminal is currently "standing"
+print(f"Current Working Directory: {os.getcwd()}")
+
+# This shows where your script file actually lives
+print(f"Script Location: {os.path.abspath(__file__)}")
+
+# This checks if the .env file exists in the CWD
+print(f"Does .env exist here? {os.path.exists('.env')}")
+
+print(os.getenv("MAIL_PASSWORD"))
+
+conf = ConnectionConfig(
+    MAIL_USERNAME = "sepppCloudbase@gmail.com",
+    MAIL_PASSWORD = os.getenv("MAIL_PASSWORD"),
+    MAIL_FROM = "noreply@cloudbase.com",
+    MAIL_PORT = 587,
+    MAIL_SERVER = "smtp.gmail.com",
+    MAIL_STARTTLS = True,
+    MAIL_SSL_TLS = False,
+    USE_CREDENTIALS = True,
+    VALIDATE_CERTS = True
+)
+
+class EmailSchema(BaseModel):
+    email: EmailStr
+    
+
+@app.post("/send-password")
+async def send_password_email(request: Request, user: EmailSchema, background_tasks: FABackgroundTask):
+    # In a real app, generate a temporary password or reset token here
+    password = "SecurePassword123!"
+    fm = FastMail(conf)
+    print(user.email)
+    thisuser = await request.json()
+    name = thisuser.get("name")
+
+    users = load_userdb()
+    message1 = "User doesnt exist"
+    for u in users["users"]:
+        if u["name"] == name:
+            if "email" in u:
+                if u["email"] == user.email:
+                    password = u["pw"]
+                    message1 = "Email has been sent"
+                else: 
+                    message1 ="wrong  Email"
+    
+    html = f"""
+    <p>Hi {name},</p>
+    <p>Your password is: <strong>{password}</strong></p>
+    """
+
+    message = MessageSchema(
+        subject="Your New Password",
+        recipients=[user.email],
+        body=html,
+        subtype=MessageType.html
+    )
+
+
+
+
+    if message1 == "Email has been sent":
+        background_tasks.add_task(fm.send_message, message)
+
+    return {"message": message1}
+
+
+@app.get("/forgot")
+async def newaccount(request: Request):
+    return templates.TemplateResponse("resetPW.html", {"request": request,  "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
+
+
+
+
+
+
+
+
+
+
+
+
+@app.get("/admin/download_users")
+async def download_users(token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    file_path = os.path.join(storage_path, "users.json")
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="users.json not found")
+
+    return FileResponse(
+        path=file_path,
+        filename="users.json",
+        media_type="application/json"
+    )
+
+@app.post("/pw")
+async def check_pw(request: Request, response: Response):
+    import os
+    import json
+
+    users_file = os.path.join(storage_path, "users.json")
+    print("USERS FILE:", users_file)
+    # 🔁 reload user database
+    try:
+        with open(users_file, "r", encoding="utf-8") as f:
+            userdb = json.load(f)
+    except Exception:
+        return {"message": "USER DATABASE ERROR"}
+
+    thisuser = await request.json()
+    name = thisuser.get("name")
+    pw = thisuser.get("pw")
+
+    print("LOGIN REQUEST:", name)
+    print("CURRENT USERS:", [u["name"] for u in userdb["users"]])
+
+    # 🔍 check user
+    for user in userdb["users"]:
+        if user["name"] == name:
+            if user["pw"] == pw:
+                return {"message": "CORRECT", "data": thisuser}
+            else:
+                return {"message": "WRONG PW"}
+
+    return {"message": f"NO USER CALLED {name}"}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel(request: Request, token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    files = os.listdir(tasks_path)
+
+    html = f"""
+    <html>
+    <head>
+        <title>Admin Panel</title>
+        <style>
+            body {{ font-family: Arial; padding: 20px; }}
+            .task {{ margin-bottom: 10px; }}
+            button {{ margin-left: 10px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Admin Panel</h1>
+        <h2>User Data</h2>
+
+        <button onclick="downloadUsers()">Download users.json</button>
+        <h2>Upload Task</h2>
+        <form action="/admin/upload_task?token={token}" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" accept=".json" required>
+            <button type="submit">Upload</button>
+        </form>
+
+        <h2>Existing Tasks</h2>
+    """
+
+    for f in files:
+        html += f"""
+        <div class="task">
+            {f}
+            <form style="display:inline;" action="/admin/delete_task?token={token}" method="post">
+                <input type="hidden" name="filename" value="{f}">
+                <button type="submit">Delete</button>
+            </form>
+        </div>
+        """
+
+    html +=f"""
+    </body>
+    <script>
+        const TOKEN = "{token}";
+
+        function downloadUsers() {{
+            const url = `/admin/download_users?token=${{TOKEN}}`;
+
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "users.json";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }}
+    </script>
+    </html>
+    """
+
+    return HTMLResponse(content=html)
+@app.post("/admin/delete_task")
+async def delete_task(filename: str = Form(...), token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    file_path = os.path.join(tasks_path, filename)
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    os.remove(file_path)
+    reload_tasks()
+    return {"message": f"{filename} deleted"}
+
+
+
+@app.post("/admin/upload_task")
+async def upload_task(file: UploadFile = File(...), token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not file.filename.endswith(".json"):
+        raise HTTPException(status_code=400, detail="Only JSON files allowed")
+
+    file_path = os.path.join(tasks_path, file.filename)
+
+    try:
+        content = await file.read()
+
+        # validate JSON
+        json.loads(content)
+
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    reload_tasks()
+    return {"message": f"{file.filename} uploaded"}
+'''
+@app.post("/pw")
+async def check_pw(request: Request, response: Response):
+    thisuser = await request.json()
+    name = thisuser["name"]
+    pw = thisuser["pw"]
+    print("json:", thisuser)
+    found = False
+    
+    for user in userdb["users"]:
+        print("user:", user)
+        if user["name"] == name:
+            found = True
+            print("found user:", user)
+    
+            if user["pw"] == pw:
+                print("correct pw")
+                return {"message": f"CORRECT","data":thisuser}
+            else:
+                return {"message": f"WRONG PW"}
+    if not found:
+        return {"message": f"NO USER Called {name}"}
+'''   
+      
+'''
+@app.post("/upload")
+async def upload( response: Response, file: UploadFile = File(...), myjson: str = Form(...)):
+
+
+
+    thisuser = json.loads(myjson)
+    print(thisuser["name"])
+    found = False
+    for user in userdb["users"]:
+        if user["name"] == thisuser["name"]:
+            found = True
+    
+    if found:
+        return {"message": f"user exists"}
+    else:
+                #raise HTTPException(status_code=400, detail='User already exists')
+        # In a real application, you would hash the password before storing it
+        thisuser["pw"] = id_generator()
+        thisuser["tex"] = file.filename
+        userdb["users"].append(thisuser)
+        name = thisuser["name"]
+        pw = thisuser["pw"]
+        try:
+            contents = file.file.read()
+            #print(file.name)
+            with open(userskin_path + "/" + file.filename, "wb") as f:
+                f.write(contents)
+                print("write file")
+
+        except Exception:
+            raise HTTPException(status_code=500, detail='Something went wrong')
+        finally:
+            file.file.close()
+            with open(storage_path + 'users.json', 'w', encoding='utf-8') as f:
+        #global userdb 
+                json.dump(userdb,f)
+                f.close()
+
+        return {"message": f"Welcome {name} ! your Password is {pw}"}
+
+'''
+@app.post("/upload")
+async def upload(
+    response: Response,
+    file: UploadFile = File(...),
+    myjson: str = Form(...)
+):
+    import os
+    import json
+
+    users_file = os.path.join(storage_path, "users.json")
+    print("USERS FILE:", users_file)
+    # 🔁 ALWAYS reload user database from disk
+    try:
+        with open(users_file, "r", encoding="utf-8") as f:
+            userdb = json.load(f)
+    except Exception:
+        userdb = {"users": []}
+
+    # 📦 parse incoming user data
+    thisuser = json.loads(myjson)
+    username = thisuser.get("name")
+
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username")
+
+    print("NEW USER REQUEST:", username)
+    print("CURRENT USERS:", [u["name"] for u in userdb["users"]])
+
+    # 🚫 check if user already exists (clean + early return)
+    if any(u["name"] == username for u in userdb["users"]):
+        return {"message": "user exists"}
+
+    # ✅ create new user
+    thisuser["pw"] = id_generator()
+    thisuser["tex"] = file.filename
+
+    userdb["users"].append(thisuser)
+
+    # 💾 save uploaded file
+    try:
+        os.makedirs(userskin_path, exist_ok=True)
+
+        file_path = os.path.join(userskin_path, file.filename)
+
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        print("Saved file:", file_path)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+
+    # 💾 write updated users.json back to disk
+    try:
+        with open(users_file, "w", encoding="utf-8") as f:
+            json.dump(userdb, f, indent=2)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save user: {str(e)}")
+
+    return {
+        "message": f"Welcome {username}! your Password is {thisuser['pw']}"
+    }
+
+# HTML ROUTE
+@app.get("/createAccount")
+async def newaccount(request: Request):
+    return templates.TemplateResponse("upload.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
+
+@app.get("/clients")
+async def showclients():
+    #print("clients:", clients)
+    return json.dumps(clients)
+
+@app.get("/test")
+async def test(request: Request):
+    return userdb
+    #return templates.TemplateResponse(request=request, name="client.html", context={"name": {"ree":123}, "tex": "reee"})
+    #return templates.TemplateResponse("client.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL, "serverWS":serverWS}})
+
+@app.get("/cloudbase1337/{name}/{pw}", response_class=HTMLResponse)
+async def multiplayermap(request: Request, name: str, pw: str):
+    
+    thisuser = searchUser(name,pw)
+    print(thisuser) 
+    taskfiles = os.listdir(tasks_path)
+    if thisuser is None:
+        return templates.TemplateResponse("login.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
+    else:
+        #return templates.TemplateResponse(request=request, name="client.html", context={"name": thisuser["name"], "tex": thisuser["tex"], "json_data": taskdata})
+        
+        return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":thisuser, "livetask":5, "serverURL":serverURL, "serverWS":serverWS}})
+    #return templates.TemplateResponse(request=request)
+
+
+
+
+
+
+
+
+
+
+
+@websocket_handler("GAMESERVER_CLIENT_UPDATE_STATE", HandlerType.SERVER)
+async def info_update_handler(message: WebSocketMessage) -> None:
+    """
+    Handle position updates from clients.
+
+    This handler processes incoming WebSocket messages containing
+    geographical data from clients. It updates the client's position
+    information in the server's client registry.
+
+    Example message format:
+    {
+        "event_name": "GAMESERVER_CLIENT_UPDATE",
+        "to": "others",
+        "payload": {
+            "lat: 48.210033,
+            "long": 16.363449,
+            "alt": 2345,
+            "rot_x": 0.3,
+            "rot_y": 0.4,
+            "rot_z": 0.5,
+            "type": 1,
+            "anim": 2
+        }
+    }
+
+    Parameters:
+    - message (WebSocketMessage): The incoming WebSocket message containing
+      the client's position data.
+    """
+    try:
+        data = message.payload
+        print("info_update_handler payload:", message.payload)
+        Name = data.get("name")
+        latitude = data.get("lat")
+        longitude = data.get("long")
+        altitude = data.get("alt")
+        rotation_x = data.get("rot_x")
+        rotation_y = data.get("rot_y")
+        rotation_z = data.get("rot_z")
+        aircraft_type = data.get("type")
+        animation_state = data.get("anim")
+        Tex = data.get("tex")
+        Tp = data.get("tp")
+        Flag = data.get("flag")
+        '''
+        if not all(
+            isinstance(x, int | float | any)
+            for x in [name, latitude, longitude, altitude, rotation_x, rotation_y, rotation_z, aircraft_type, animation_state]
+        ):
+            for x in [
+                name,
+                latitude,
+                longitude,
+                altitude,
+                rotation_x,
+                rotation_y,
+                rotation_z,
+                aircraft_type,
+                animation_state,
+            ]:
+                print(x, type(x))
+
+            logger.error("Invalid data types in payload")
+            return
+        '''
+        # Retrieve the current name or use a default if not set
+        state = get_client_state(message.from_id)
+        current_name = state.get("name", "Unknown") if state else "Unknown"
+
+        # Update client state
+        update_client_state(
+            message.from_id,
+            name=Name,
+            lat=latitude,
+            long=longitude,
+            alt=altitude,
+            rot_x=rotation_x,
+            rot_y=rotation_y,
+            rot_z=rotation_z,
+            type=aircraft_type,
+            anim=animation_state,
+            tp = Tp,
+            flag = Flag,
+            tex=Tex,
+        )
+        logger.debug("Updated client info", client_id=message.from_id, data=data)
+    except Exception as e:
+        logger.exception("Error handling GAMESERVER_CLIENT_UPDATE", error=str(e))
+
+
+@BackgroundTasks.periodic(interval=1, name="GAMESERVER_broadcast_nearby_clients")
+async def broadcast_updates() -> None:
+    """
+    Periodically broadcast updates about nearby clients to each connected client.
+
+    This function runs every second and performs the following steps for each client:
+    1. Gets the client's current position
+    2. Finds all other clients within the specified range
+    3. Sends a GAMESERVER_NEARBY_UPDATE message containing information about nearby clients
+
+    The message format sent to each client is:
+    {
+        "event_name": "GAMESERVER_NEARBY_UPDATE",
+        "payload": {
+            "nearby_clients": [
+                {
+                    "client_id": "uuid",
+                    "name": "Client Name",
+                    "lat": float,
+                    "long": float,
+                    "alt": float,
+                    "rot_x": float,
+                    "rot_y": float,
+                    "rot_z": float,
+                    "type": int,
+                    "anim": int
+                },
+                ...
+            ]
+        }
+    }
+    """
+    logger.debug("Starting broadcast cycle")
+
+    # Iterate through all connected clients
+    for client_id, client_data in clients.items():
+        state = client_data["state"]
+
+        # Get current client's position
+        lat1, lon1 = state.get("lat", 0), state.get("long", 0)
+
+        # Skip clients without valid position data
+        if lat1 == 0 and lon1 == 0:
+            continue
+
+        nearby_clients = []
+
+        # Check distance to all other clients
+        for other_id, other_data in clients.items():
+            # Skip self
+            if client_id == other_id:
+                continue
+
+            other_state = other_data["state"]
+            lat2, lon2 = other_state.get("lat", 0), other_state.get("long", 0)
+            # Skip clients without valid position data
+            if lat2 == 0 and lon2 == 0:
+                continue
+
+            # If client is within range, add their info to the nearby list
+            if is_within_range(lat1, lon1, lat2, lon2):
+                nearby_clients.append({
+                    "client_id": other_id,
+                    "name": other_state.get("name"),
+                    "lat": lat2,
+                    "long": lon2,
+                    "alt": other_state.get("alt"),
+                    "rot_x": other_state.get("rot_x"),
+                    "rot_y": other_state.get("rot_y"),
+                    "rot_z": other_state.get("rot_z"),
+                    "type": other_state.get("type"),
+                    "anim": other_state.get("anim"),
+                    "tp" :  other_state.get("tp"),
+                    "flag":  other_state.get("flag"),
+                    "tex":  other_state.get("tex"),
+                })
+
+        # also send if no nearby clients, to potentially clean old clients, could be improved:
+        # TODO: check if last update was already empty for this client, if so, skip
+
+        # if nearby_clients: # only send if there are nearby clients
+
+        message = create_message(
+            event_name="GAMESERVER_NEARBY_UPDATE", payload={"nearby_clients": nearby_clients}, to=client_id
+        )
+        await send_message(client_data["websocket"], message)
+
+
+
+@websocket_handler("GAMESERVER_CLIENT_GPSTRACK", HandlerType.SERVER)
+async def gpstrack_handler(message: WebSocketMessage) -> None:
+    
+    filename = message.payload["taskname"] + '_' + message.payload["name"] + '_' + message.from_id[:5]+ '_' + str(message.payload["rtime"])
+    print(filename)
+    
+    with open( tracks_path +'/' + filename +'.json', 'w', encoding='utf-8') as f:
+        json.dump(message.payload,f)
+    f.close()
+
+    #print(message.payload)
+    
+
+@websocket_handler("GAMESERVER_CLIENT_SETNAME", HandlerType.SERVER)
+async def set_name_handler(message: WebSocketMessage) -> None:
+    """
+    Handle the GAMESERVER_CLIENT_SETNAME event from clients.
+
+    This handler allows clients to update their display name on the server.
+    It processes incoming WebSocket messages containing the new name and
+    updates the client's information in the server's client registry.
+
+    Example message format:
+    {
+        "event_name": "GAMESERVER_CLIENT_SETNAME",
+        "to": "others",
+        "payload": {
+            "name": "Timmey"
+        }
+    }
+
+    Parameters:
+    - message (WebSocketMessage): The incoming WebSocket message containing
+      the client's new name.
+    """
+
+    try:
+        print("set_name_handler payload:", message.payload)
+        name = message.payload.get("name", "")
+        tex = message.payload.get("tex", "")
+        if not isinstance(name, str) or not name.strip():
+            logger.error("Invalid name format")
+            return
+
+        # Get existing state to preserve other fields
+        existing_state = get_client_state(message.from_id) or {}
+
+        # Create new state dict with updated name
+        new_state = existing_state.copy()
+        new_state["name"] = name.strip()
+        new_state["tex"] = tex.strip()
+
+        # Update state with all fields
+        update_client_state(message.from_id, **new_state)
+        logger.debug("Updated client name", client_id=message.from_id, name=name)
+
+
+
+    except Exception as e:
+        logger.exception("Error handling GAMESERVER_CLIENT_SETNAME", error=str(e))
+
+
+'''
+@websocket_handler("GAMESERVER_CLIENT_GETTASKLIST", HandlerType.SERVER)
+async def set_tasklist_handler(message: WebSocketMessage) -> None:
+    import os
+    
+    filepath = os.path.dirname(os.path.realpath(__file__))
+    #parent = os.path.abspath(os.path.join(filepath, os.pardir))
+    taskfiles = os.listdir(filepath + "/tasks")
+
+    try:
+        return WebSocketMessage(event_name="TASKLIST", payload={"tasks":taskfiles}, to=message.from_id)
+    
+    except Exception as e:
+        logger.exception("Error handling GAMESERVER_CLIENT_SETNAME", error=str(e))
+'''
+
+@websocket_handler("get_task", HandlerType.SERVER)
+async def set_task_handler(message: WebSocketMessage) -> None:
+    try:
+        reload_tasks()
+        thistask = {}
+        found = False
+        for t in taskdata["tasks"]:
+            if message.payload.get("name", "") == t["name"]:
+                thistask = t
+                found = True
+                break
+        if found:
+            trackfiles = os.listdir(tracks_path)
+
+            tname = thistask["name"]
+            matchingtracks = []
+            for tr in trackfiles:
+                name = tr.split("_")
+                if name[0] == tname:
+                    with open(tracks_path +'/' + tr, 'r', encoding='utf-8') as f: 
+                        thistr = json.load(f)
+                        matchingtracks.append(thistr)
+                    f.close()
+                    break
+
+            for t in matchingtracks:
+                thisu = getUser(t["name"])
+                tex = ""
+                flag = "https://flagcdn.com/de.svg"
+                if thisu == None:
+                    tex = "1.png"
+                else:
+                    tex = thisu["tex"]
+                    flag = thisu["flag"]
+                t["tex"] = tex
+                t["flag"] = flag
+
+
+            
+            sortedtracks = sorted(matchingtracks, key=lambda k: k.get('rtime', 0), reverse=False)
+
+            thistask["tracks"] = sortedtracks
+
+            return WebSocketMessage(event_name="TASK", payload=thistask, to=message.from_id)
+        else:
+            print("couldent find task")
+    except Exception as e:
+        logger.exception("Error handling GAMESERVER_CLIENT_SETNAME", error=str(e))
+
+
+
+if __name__ == "__main__":
+    import uvicorn
+    #global userdb
+
+    #reload_tasks()
+
+
+    # check if /storage/users.json exist, if not create with default
+
+
+    with open(storage_path + 'users.json', 'r', encoding='utf-8') as f:
+        #global userdb 
+        userdb = json.load(f)
+        f.close()
+    #print(userdb)
+    if localserver:
+        uvicorn.run(app, host="127.0.0.1", port=8765)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=8765)
+    print("post start")

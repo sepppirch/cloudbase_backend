@@ -1,0 +1,70 @@
+site_name: datadivr
+site_description: WebSocket-based data communication framework
+repo_url: https://github.com/menchelab/datadivr
+repo_name: menchelab/datadivr
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+            show_category_heading: true
+            show_submodules: true
+  - include-markdown
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: installation.md
+      - Command Line Interface: cli.md
+  - Reference:
+      - Models:
+          - WebSocketMessage: ref/model_websocketmessage.md
+          - Project: ref/model_project.md
+      - Handlers:
+          - ref/handlers.md
+      - Transport:
+          - Transport: ref/transport.md
+          - Client: ref/client.md
+          - Server: ref/server.md
+      - CLI: ref/cli.md
+  - Technical Overview: technical_overview.md
+  - Examples: examples.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
