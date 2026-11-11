@@ -6,17 +6,19 @@ from datadivr.transport.messages import create_message, send_message
 from datadivr.transport.models import WebSocketMessage
 from datadivr.transport.server import clients, get_client_state, update_client_state
 from datadivr.utils.logging import get_logger, setup_logging
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi import  Request
+import hashlib
+import hmac
+import html
 import json
-import string
-import random
+import secrets
 import shutil
-from fastapi import File, Form, UploadFile, Request, FastAPI, HTTPException
+import string
+import time
+from fastapi import File, Form, UploadFile, Request, HTTPException
 from fastapi.responses import FileResponse
-from os import listdir
 from fastapi import BackgroundTasks as FABackgroundTask
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from pydantic import EmailStr, BaseModel
@@ -35,7 +37,6 @@ load_dotenv()
 
 global taskdata
 taskdata = {"tasks":[]}
-userdb = {}
 serverURL = ""
 serverWS = ""
 localserver = True
@@ -43,7 +44,16 @@ localserver = True
 storage_path = os.getenv("PERSISTANT_PATH", "examples/gameserver/")
 
 ### ADMIN
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "supersecret123")
+# No default: if ADMIN_TOKEN is not set, the admin endpoints are disabled.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+if not ADMIN_TOKEN:
+    logger.warning("ADMIN_TOKEN is not set - admin endpoints are disabled")
+
+# Secret used to sign login session cookies. If unset, a random one is
+# generated per process, which logs everyone out on restart.
+SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
+SESSION_COOKIE = "cb_session"
+SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 userskin_path = ""
 tasks_path = ""
@@ -66,7 +76,7 @@ persistantFiles = os.listdir(storage_path)
 print(persistantFiles)
 if "users.json" not in persistantFiles:
     print("not found")
-    with open(storage_path + 'users.json', 'w') as f:
+    with open(os.path.join(storage_path, 'users.json'), 'w') as f:
         data = {"users":[]}
         json.dump(data, f)
 
@@ -133,24 +143,151 @@ for t in taskfiles:
         f.close()
 '''
 def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
-    return ''.join(random.choice(chars) for _ in range(size))
+    return ''.join(secrets.choice(chars) for _ in range(size))
 
-def load_userdb():
-    import os, json
-    users_file = os.path.join(storage_path, "users.json")
+
+### USERS / PASSWORDS
+USERS_FILE = os.path.join(storage_path, "users.json")
+PBKDF2_ITERATIONS = 200_000
+HASH_PREFIX = "pbkdf2_sha256"
+
+
+def hash_password(pw) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", str(pw).encode("utf-8"), salt.encode("ascii"), PBKDF2_ITERATIONS)
+    return f"{HASH_PREFIX}${PBKDF2_ITERATIONS}${salt}${digest.hex()}"
+
+
+def is_hashed(stored) -> bool:
+    return isinstance(stored, str) and stored.startswith(HASH_PREFIX + "$")
+
+
+def verify_password(pw, stored) -> bool:
+    if pw is None or stored is None:
+        return False
+    if not is_hashed(stored):
+        # legacy plaintext entry (migrated at startup, kept as a fallback)
+        return hmac.compare_digest(str(pw), str(stored))
     try:
-        with open(users_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {"users": []}
+        _, iterations, salt, expected = stored.split("$")
+        digest = hashlib.pbkdf2_hmac("sha256", str(pw).encode("utf-8"), salt.encode("ascii"), int(iterations))
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(digest.hex(), expected)
+
+
+def load_userdb(strict: bool = False):
+    """strict=True raises instead of returning an empty DB; use it before writing,
+    so a read error can never overwrite users.json with an empty list."""
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("users"), list):
+            return data
+        raise ValueError("users.json has no 'users' list")
+    except (OSError, ValueError):
+        if strict:
+            raise
+        logger.exception("Could not read users.json")
+    return {"users": []}
+
+
+def save_userdb(data) -> None:
+    # write to a temp file and swap, so a crash never leaves a half-written users.json
+    tmp = USERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, USERS_FILE)
+
+
+def migrate_plaintext_passwords() -> None:
+    try:
+        data = load_userdb(strict=True)
+    except (OSError, ValueError):
+        logger.exception("Skipping password migration: users.json unreadable")
+        return
+    changed = 0
+    for user in data["users"]:
+        if "pw" in user and not is_hashed(user["pw"]):
+            user["pw"] = hash_password(user["pw"])
+            changed += 1
+    if changed:
+        save_userdb(data)
+        logger.info("Hashed plaintext passwords in users.json", count=changed)
+
+
+migrate_plaintext_passwords()
+
+
+def public_user(user: dict) -> dict:
+    """User fields that are safe to send to the browser (no password / email)."""
+    return {k: v for k, v in user.items() if k not in ("pw", "email")}
 
 
 def searchUser(name, pw):
     userdb = load_userdb()
     for user in userdb["users"]:
-        if user["name"] == name and user["pw"] == pw:
+        if user.get("name") == name and verify_password(pw, user.get("pw")):
             return user
     return None
+
+
+### SESSIONS (signed cookie: name|expiry|signature)
+def make_session(name: str) -> str:
+    expires = str(int(time.time()) + SESSION_MAX_AGE)
+    payload = f"{name}|{expires}"
+    sig = hmac.new(SESSION_SECRET.encode(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}|{sig}"
+
+
+def read_session(token) -> str | None:
+    if not token:
+        return None
+    try:
+        name, expires, sig = token.rsplit("|", 2)
+    except ValueError:
+        return None
+    payload = f"{name}|{expires}"
+    expected = hmac.new(SESSION_SECRET.encode(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    if not expires.isdigit() or int(expires) < time.time():
+        return None
+    return name
+
+
+def set_session_cookie(response: Response, name: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        make_session(name),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=not localserver,
+    )
+
+
+### ADMIN AUTH / FILE NAME SAFETY
+def require_admin(token: str) -> None:
+    if not ADMIN_TOKEN or not hmac.compare_digest(str(token), ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+SKIN_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+MAX_SKIN_BYTES = 10 * 1024 * 1024
+
+
+def safe_name_part(value) -> str:
+    """Make one piece of a track file name safe (no path separators or '..')."""
+    return "".join(c if c.isalnum() or c in "-. " else "-" for c in str(value)).strip(". ")
+
+
+def safe_filename(name) -> str:
+    """Reduce a client-supplied file name to a bare name inside the target folder."""
+    base = os.path.basename(str(name or "").replace("\\", "/"))
+    if base in ("", ".", "..") or base.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid file name")
+    return base
 
 def getUser(name):
     userdb = load_userdb()
@@ -209,16 +346,10 @@ def is_within_range(lat1: float, lon1: float, lat2: float, lon2: float, max_rang
     distance = R * c
     return distance <= max_range_km
 
-# This shows where the terminal is currently "standing"
 print(f"Current Working Directory: {os.getcwd()}")
-
-# This shows where your script file actually lives
-print(f"Script Location: {os.path.abspath(__file__)}")
-
-# This checks if the .env file exists in the CWD
 print(f"Does .env exist here? {os.path.exists('.env')}")
-
-print(os.getenv("MAIL_PASSWORD"))
+if not os.getenv("MAIL_PASSWORD"):
+    logger.warning("MAIL_PASSWORD is not set - password reset emails will fail")
 
 conf = ConnectionConfig(
     MAIL_USERNAME = "sepppCloudbase@gmail.com",
@@ -238,43 +369,45 @@ class EmailSchema(BaseModel):
 
 @app.post("/send-password")
 async def send_password_email(request: Request, user: EmailSchema, background_tasks: FABackgroundTask):
-    # In a real app, generate a temporary password or reset token here
-    password = "SecurePassword123!"
-    fm = FastMail(conf)
-    print(user.email)
+    # Passwords are stored hashed, so we can't send the old one: if name and
+    # email match, set a new random password and email that instead.
     thisuser = await request.json()
     name = thisuser.get("name")
 
-    users = load_userdb()
-    message1 = "User doesnt exist"
+    try:
+        users = load_userdb(strict=True)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=500, detail="User database error")
+    match = None
     for u in users["users"]:
-        if u["name"] == name:
-            if "email" in u:
-                if u["email"] == user.email:
-                    password = u["pw"]
-                    message1 = "Email has been sent"
-                else: 
-                    message1 ="wrong  Email"
-    
-    html = f"""
-    <p>Hi {name},</p>
-    <p>Your password is: <strong>{password}</strong></p>
-    """
+        if u.get("name") == name and u.get("email") and str(u["email"]).lower() == str(user.email).lower():
+            match = u
+            break
 
-    message = MessageSchema(
-        subject="Your New Password",
-        recipients=[user.email],
-        body=html,
-        subtype=MessageType.html
-    )
+    if match is not None:
+        new_password = id_generator()
+        body = f"""
+        <p>Hi {html.escape(str(name))},</p>
+        <p>Your password has been reset. Your new password is: <strong>{new_password}</strong></p>
+        """
+        message = MessageSchema(
+            subject="Your New Password",
+            recipients=[user.email],
+            body=body,
+            subtype=MessageType.html
+        )
+        # send first and only store the new password once the mail went out,
+        # otherwise a mail failure would lock the user out
+        try:
+            await FastMail(conf).send_message(message)
+        except Exception:
+            logger.exception("Password reset email failed", name=name)
+            return {"message": "Could not send the email, please try again later"}
+        match["pw"] = hash_password(new_password)
+        save_userdb(users)
 
-
-
-
-    if message1 == "Email has been sent":
-        background_tasks.add_task(fm.send_message, message)
-
-    return {"message": message1}
+    # same answer either way, so this can't be used to probe names/emails
+    return {"message": "If the name and email match an account, an email with a new password has been sent"}
 
 
 @app.get("/forgot")
@@ -294,10 +427,9 @@ async def newaccount(request: Request):
 
 @app.get("/admin/download_users")
 async def download_users(token: str = ""):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_admin(token)
 
-    file_path = os.path.join(storage_path, "users.json")
+    file_path = USERS_FILE
 
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="users.json not found")
@@ -310,30 +442,20 @@ async def download_users(token: str = ""):
 
 @app.post("/pw")
 async def check_pw(request: Request, response: Response):
-    import os
-    import json
-
-    users_file = os.path.join(storage_path, "users.json")
-    print("USERS FILE:", users_file)
-    # 🔁 reload user database
-    try:
-        with open(users_file, "r", encoding="utf-8") as f:
-            userdb = json.load(f)
-    except Exception:
-        return {"message": "USER DATABASE ERROR"}
+    userdb = load_userdb()
 
     thisuser = await request.json()
     name = thisuser.get("name")
     pw = thisuser.get("pw")
 
     print("LOGIN REQUEST:", name)
-    print("CURRENT USERS:", [u["name"] for u in userdb["users"]])
 
-    # 🔍 check user
     for user in userdb["users"]:
-        if user["name"] == name:
-            if user["pw"] == pw:
-                return {"message": "CORRECT", "data": thisuser}
+        if user.get("name") == name:
+            if verify_password(pw, user.get("pw")):
+                # log in via a signed HttpOnly cookie instead of putting the password in the URL
+                set_session_cookie(response, name)
+                return {"message": "CORRECT", "data": {"name": name}}
             else:
                 return {"message": "WRONG PW"}
 
@@ -342,12 +464,14 @@ async def check_pw(request: Request, response: Response):
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(request: Request, token: str = ""):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_admin(token)
 
     files = os.listdir(tasks_path)
+    # token already matched ADMIN_TOKEN, but escape it anyway before putting it in HTML/JS
+    token_attr = html.escape(token, quote=True)
+    token_js = json.dumps(token).replace("<", "\\u003c")
 
-    html = f"""
+    page = f"""
     <html>
     <head>
         <title>Admin Panel</title>
@@ -363,7 +487,7 @@ async def admin_panel(request: Request, token: str = ""):
 
         <button onclick="downloadUsers()">Download users.json</button>
         <h2>Upload Task</h2>
-        <form action="/admin/upload_task?token={token}" method="post" enctype="multipart/form-data">
+        <form action="/admin/upload_task?token={token_attr}" method="post" enctype="multipart/form-data">
             <input type="file" name="file" accept=".json" required>
             <button type="submit">Upload</button>
         </form>
@@ -372,23 +496,23 @@ async def admin_panel(request: Request, token: str = ""):
     """
 
     for f in files:
-        html += f"""
+        page += f"""
         <div class="task">
-            {f}
-            <form style="display:inline;" action="/admin/delete_task?token={token}" method="post">
-                <input type="hidden" name="filename" value="{f}">
+            {html.escape(f)}
+            <form style="display:inline;" action="/admin/delete_task?token={token_attr}" method="post">
+                <input type="hidden" name="filename" value="{html.escape(f, quote=True)}">
                 <button type="submit">Delete</button>
             </form>
         </div>
         """
 
-    html +=f"""
+    page += f"""
     </body>
     <script>
-        const TOKEN = "{token}";
+        const TOKEN = {token_js};
 
         function downloadUsers() {{
-            const url = `/admin/download_users?token=${{TOKEN}}`;
+            const url = `/admin/download_users?token=${{encodeURIComponent(TOKEN)}}`;
 
             const a = document.createElement("a");
             a.href = url;
@@ -401,12 +525,12 @@ async def admin_panel(request: Request, token: str = ""):
     </html>
     """
 
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=page)
 @app.post("/admin/delete_task")
 async def delete_task(filename: str = Form(...), token: str = ""):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_admin(token)
 
+    filename = safe_filename(filename)
     file_path = os.path.join(tasks_path, filename)
 
     if not os.path.isfile(file_path):
@@ -420,13 +544,13 @@ async def delete_task(filename: str = Form(...), token: str = ""):
 
 @app.post("/admin/upload_task")
 async def upload_task(file: UploadFile = File(...), token: str = ""):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_admin(token)
 
-    if not file.filename.endswith(".json"):
+    filename = safe_filename(file.filename)
+    if not filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="Only JSON files allowed")
 
-    file_path = os.path.join(tasks_path, file.filename)
+    file_path = os.path.join(tasks_path, filename)
 
     try:
         content = await file.read()
@@ -440,134 +564,58 @@ async def upload_task(file: UploadFile = File(...), token: str = ""):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     reload_tasks()
-    return {"message": f"{file.filename} uploaded"}
-'''
-@app.post("/pw")
-async def check_pw(request: Request, response: Response):
-    thisuser = await request.json()
-    name = thisuser["name"]
-    pw = thisuser["pw"]
-    print("json:", thisuser)
-    found = False
-    
-    for user in userdb["users"]:
-        print("user:", user)
-        if user["name"] == name:
-            found = True
-            print("found user:", user)
-    
-            if user["pw"] == pw:
-                print("correct pw")
-                return {"message": f"CORRECT","data":thisuser}
-            else:
-                return {"message": f"WRONG PW"}
-    if not found:
-        return {"message": f"NO USER Called {name}"}
-'''   
-      
-'''
-@app.post("/upload")
-async def upload( response: Response, file: UploadFile = File(...), myjson: str = Form(...)):
-
-
-
-    thisuser = json.loads(myjson)
-    print(thisuser["name"])
-    found = False
-    for user in userdb["users"]:
-        if user["name"] == thisuser["name"]:
-            found = True
-    
-    if found:
-        return {"message": f"user exists"}
-    else:
-                #raise HTTPException(status_code=400, detail='User already exists')
-        # In a real application, you would hash the password before storing it
-        thisuser["pw"] = id_generator()
-        thisuser["tex"] = file.filename
-        userdb["users"].append(thisuser)
-        name = thisuser["name"]
-        pw = thisuser["pw"]
-        try:
-            contents = file.file.read()
-            #print(file.name)
-            with open(userskin_path + "/" + file.filename, "wb") as f:
-                f.write(contents)
-                print("write file")
-
-        except Exception:
-            raise HTTPException(status_code=500, detail='Something went wrong')
-        finally:
-            file.file.close()
-            with open(storage_path + 'users.json', 'w', encoding='utf-8') as f:
-        #global userdb 
-                json.dump(userdb,f)
-                f.close()
-
-        return {"message": f"Welcome {name} ! your Password is {pw}"}
-
-'''
+    return {"message": f"{filename} uploaded"}
 @app.post("/upload")
 async def upload(
     response: Response,
     file: UploadFile = File(...),
     myjson: str = Form(...)
 ):
-    import os
-    import json
-
-    users_file = os.path.join(storage_path, "users.json")
-    print("USERS FILE:", users_file)
-    # 🔁 ALWAYS reload user database from disk
     try:
-        with open(users_file, "r", encoding="utf-8") as f:
-            userdb = json.load(f)
-    except Exception:
-        userdb = {"users": []}
+        userdb = load_userdb(strict=True)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=500, detail="User database error")
 
-    # 📦 parse incoming user data
     thisuser = json.loads(myjson)
     username = thisuser.get("name")
 
-    if not username:
+    if not isinstance(username, str) or not username.strip():
         raise HTTPException(status_code=400, detail="Missing username")
 
     print("NEW USER REQUEST:", username)
-    print("CURRENT USERS:", [u["name"] for u in userdb["users"]])
 
-    # 🚫 check if user already exists (clean + early return)
-    if any(u["name"] == username for u in userdb["users"]):
+    if any(u.get("name") == username for u in userdb["users"]):
         return {"message": "user exists"}
 
-    # ✅ create new user
-    thisuser["pw"] = id_generator()
-    thisuser["tex"] = file.filename
-
-    userdb["users"].append(thisuser)
-
-    # 💾 save uploaded file
+    # save the uploaded skin; never overwrite someone else's file
+    skin_name = safe_filename(file.filename)
+    if os.path.splitext(skin_name)[1].lower() not in SKIN_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Skin must be a .png or .jpg image")
+    content = await file.read(MAX_SKIN_BYTES + 1)
+    if len(content) > MAX_SKIN_BYTES:
+        raise HTTPException(status_code=400, detail="Skin file is too large")
+    os.makedirs(userskin_path, exist_ok=True)
+    if os.path.exists(os.path.join(userskin_path, skin_name)):
+        skin_name = f"{id_generator()}_{skin_name}"
     try:
-        os.makedirs(userskin_path, exist_ok=True)
-
-        file_path = os.path.join(userskin_path, file.filename)
-
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
-
-        print("Saved file:", file_path)
-
+        with open(os.path.join(userskin_path, skin_name), "wb") as f:
+            f.write(content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
-    # 💾 write updated users.json back to disk
+    # create the user; only the hash of the generated password is stored
+    password = id_generator()
+    thisuser["pw"] = hash_password(password)
+    thisuser["tex"] = skin_name
+    userdb["users"].append(thisuser)
+
     try:
-        with open(users_file, "w", encoding="utf-8") as f:
-            json.dump(userdb, f, indent=2)
+        save_userdb(userdb)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save user: {str(e)}")
 
     return {
-        "message": f"Welcome {username}! your Password is {thisuser['pw']}"
+        "message": f"Welcome {username}! your Password is {password}"
     }
 
 # HTML ROUTE
@@ -580,34 +628,25 @@ async def showclients():
     #print("clients:", clients)
     return json.dumps(clients)
 
-@app.get("/test")
-async def test(request: Request):
-    return userdb
-    #return templates.TemplateResponse(request=request, name="client.html", context={"name": {"ree":123}, "tex": "reee"})
-    #return templates.TemplateResponse("client.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL, "serverWS":serverWS}})
-
-@app.get("/cloudbase1337/{name}/{pw}", response_class=HTMLResponse)
-async def multiplayermap(request: Request, name: str, pw: str):
-    
-    thisuser = searchUser(name,pw)
-    print(thisuser) 
+@app.get("/cloudbase1337", response_class=HTMLResponse)
+async def multiplayermap(request: Request):
     taskfiles = os.listdir(tasks_path)
+    name = read_session(request.cookies.get(SESSION_COOKIE))
+    thisuser = getUser(name) if name else None
     if thisuser is None:
         return templates.TemplateResponse("login.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
-    else:
-        #return templates.TemplateResponse(request=request, name="client.html", context={"name": thisuser["name"], "tex": thisuser["tex"], "json_data": taskdata})
-        
-        return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":thisuser, "livetask":5, "serverURL":serverURL, "serverWS":serverWS}})
-    #return templates.TemplateResponse(request=request)
+    return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":public_user(thisuser), "livetask":5, "serverURL":serverURL, "serverWS":serverWS}})
 
 
-
-
-
-
-
-
-
+@app.get("/cloudbase1337/{name}/{pw}", response_class=HTMLResponse)
+async def multiplayermap_legacy(request: Request, name: str, pw: str):
+    """Old link format with the password in the URL. Kept so existing links/clients
+    still work: log in, set the session cookie and redirect to the clean URL."""
+    if searchUser(name, pw) is None:
+        return RedirectResponse(url=f"{serverURL}/cloudbase1337", status_code=303)
+    redirect = RedirectResponse(url=f"{serverURL}/cloudbase1337", status_code=303)
+    set_session_cookie(redirect, name)
+    return redirect
 
 
 @websocket_handler("GAMESERVER_CLIENT_UPDATE_STATE", HandlerType.SERVER)
@@ -792,12 +831,17 @@ async def broadcast_updates() -> None:
 @websocket_handler("GAMESERVER_CLIENT_GPSTRACK", HandlerType.SERVER)
 async def gpstrack_handler(message: WebSocketMessage) -> None:
     
-    filename = message.payload["taskname"] + '_' + message.payload["name"] + '_' + message.from_id[:5]+ '_' + str(message.payload["rtime"])
+    # sanitise each piece so the file stays inside tracks/ and get_task can still split on "_"
+    parts = [safe_name_part(message.payload["taskname"]), safe_name_part(message.payload["name"]),
+             safe_name_part(message.from_id[:5]), safe_name_part(message.payload["rtime"])]
+    if not all(parts):
+        logger.error("Invalid GPS track file name", parts=parts)
+        return
+    filename = "_".join(parts)
     print(filename)
-    
-    with open( tracks_path +'/' + filename +'.json', 'w', encoding='utf-8') as f:
+
+    with open(os.path.join(tracks_path, filename + '.json'), 'w', encoding='utf-8') as f:
         json.dump(message.payload,f)
-    f.close()
 
     #print(message.payload)
     
@@ -885,7 +929,7 @@ async def set_task_handler(message: WebSocketMessage) -> None:
             matchingtracks = []
             for tr in trackfiles:
                 name = tr.split("_")
-                if name[0] == tname:
+                if name[0] in (tname, safe_name_part(tname)):
                     with open(tracks_path +'/' + tr, 'r', encoding='utf-8') as f: 
                         thistr = json.load(f)
                         matchingtracks.append(thistr)
@@ -928,11 +972,6 @@ if __name__ == "__main__":
     # check if /storage/users.json exist, if not create with default
 
 
-    with open(storage_path + 'users.json', 'r', encoding='utf-8') as f:
-        #global userdb 
-        userdb = json.load(f)
-        f.close()
-    #print(userdb)
     if localserver:
         uvicorn.run(app, host="127.0.0.1", port=8765)
     else:
