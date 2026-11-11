@@ -121,6 +121,22 @@ else:
     serverURL = "https://cloudbase.lab.lbi-netmed.com"
     serverWS = "wss://cloudbase.lab.lbi-netmed.com/ws"
 
+# Address to listen on. Local mode defaults to this machine only; set
+# HOST=0.0.0.0 to make the local test server reachable from your network.
+HOST = os.getenv("HOST", "127.0.0.1" if localserver else "0.0.0.0")
+PORT = int(os.getenv("PORT", "8765"))
+
+
+def server_urls(request: Request) -> tuple[str, str]:
+    """(http base URL, websocket URL) for links in pages.
+    Local mode uses the address the browser actually connected to, so the pages
+    also work from other computers on the network; production uses the fixed domain."""
+    if not localserver:
+        return serverURL, serverWS
+    base = str(request.base_url).rstrip("/")
+    ws = ("wss" + base[5:] if base.startswith("https") else "ws" + base[4:]) + "/ws"
+    return base, ws
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/userskins", StaticFiles(directory=userskin_path), name="userskins")
 templates = Jinja2Templates(directory="templates")
@@ -412,7 +428,7 @@ async def send_password_email(request: Request, user: EmailSchema, background_ta
 
 @app.get("/forgot")
 async def newaccount(request: Request):
-    return templates.TemplateResponse("resetPW.html", {"request": request,  "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
+    return templates.TemplateResponse("resetPW.html", {"request": request,  "json_data":  {"tasks":taskfiles, "serverURL":server_urls(request)[0]}})
 
 
 
@@ -620,15 +636,15 @@ async def upload(
 # HTML ROUTE
 @app.get("/createAccount")
 async def newaccount(request: Request):
-    return templates.TemplateResponse("upload.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
+    return templates.TemplateResponse("upload.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":server_urls(request)[0]}})
 
 @app.get("/clients")
 async def showclients():
     #print("clients:", clients)
     return json.dumps(clients)
 
-def map_url(user: dict) -> str:
-    return f"{serverURL}/cloudbase1337?t={make_token(user)}"
+def map_url(request: Request, user: dict) -> str:
+    return f"{server_urls(request)[0]}/cloudbase1337?t={make_token(user)}"
 
 
 @app.get("/cloudbase1337", response_class=HTMLResponse)
@@ -636,10 +652,10 @@ async def multiplayermap(request: Request, t: str = ""):
     taskfiles = os.listdir(tasks_path)
     thisuser = read_token(t)
     if thisuser is None:
-        return templates.TemplateResponse("login.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
+        return templates.TemplateResponse("login.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":server_urls(request)[0]}})
     user = public_user(thisuser)
     user["token"] = t
-    return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":user, "livetask":5, "serverURL":serverURL, "serverWS":serverWS}})
+    return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":user, "livetask":5, "serverURL":server_urls(request)[0], "serverWS":server_urls(request)[1]}})
 
 
 @app.get("/cloudbase1337/{name}/{pw}", response_class=HTMLResponse)
@@ -648,8 +664,8 @@ async def multiplayermap_legacy(request: Request, name: str, pw: str):
     still work: check the password once, then redirect to the token URL."""
     thisuser = searchUser(name, pw)
     if thisuser is None:
-        return RedirectResponse(url=f"{serverURL}/cloudbase1337", status_code=303)
-    return RedirectResponse(url=map_url(thisuser), status_code=303)
+        return RedirectResponse(url=f"{server_urls(request)[0]}/cloudbase1337", status_code=303)
+    return RedirectResponse(url=map_url(request, thisuser), status_code=303)
 
 
 @websocket_handler("GAMESERVER_CLIENT_UPDATE_STATE", HandlerType.SERVER)
@@ -975,8 +991,7 @@ if __name__ == "__main__":
     # check if /storage/users.json exist, if not create with default
 
 
-    if localserver:
-        uvicorn.run(app, host="127.0.0.1", port=8765)
-    else:
-        uvicorn.run(app, host="0.0.0.0", port=8765)
+    if HOST == "0.0.0.0":
+        print(f"Listening on all interfaces - open http://<this computer's IP>:{PORT}/cloudbase1337")
+    uvicorn.run(app, host=HOST, port=PORT)
     print("post start")

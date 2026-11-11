@@ -10,6 +10,8 @@ library (FastAPI + WebSockets, in `datadivr/`); the game server itself lives in
 browser assets in `static/`.
 
 - Run locally: `uv run python examples/gameserver/gameserver.py` (serves on `127.0.0.1:8765`).
+  To test from other computers on the network, set `HOST=0.0.0.0` (and
+  optionally `PORT`); in local mode page links follow the address the browser used.
 - Production mode is enabled by setting `PERSISTANT_PATH` (storage dir for
   `users.json`, `userskins/`, `tasks/`, `tracks/`).
 - Required env vars in production: `ADMIN_TOKEN` (admin panel is disabled
