@@ -44,7 +44,7 @@
                      console.log(data.data)
                      //ue4("login", data.data)
                      //console.log("{{json_data.serverURL}}")
-                     window.location.href ="{{json_data.serverURL}}/cloudbase1337";
+                     window.location.href ="{{json_data.serverURL}}/cloudbase1337?t=" + encodeURIComponent(data.data.token);
                        
                 }
             })

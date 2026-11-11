@@ -9,6 +9,7 @@ from datadivr.utils.logging import get_logger, setup_logging
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import base64
 import hashlib
 import hmac
 import html
@@ -49,10 +50,9 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 if not ADMIN_TOKEN:
     logger.warning("ADMIN_TOKEN is not set - admin endpoints are disabled")
 
-# Secret used to sign login session cookies. If unset, a random one is
-# generated per process, which logs everyone out on restart.
+# Secret used to sign login tokens. If unset, a random one is generated per
+# process, which logs everyone out on restart.
 SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
-SESSION_COOKIE = "cb_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 userskin_path = ""
@@ -232,39 +232,39 @@ def searchUser(name, pw):
     return None
 
 
-### SESSIONS (signed cookie: name|expiry|signature)
-def make_session(name: str) -> str:
+### LOGIN TOKENS
+# The Unreal in-game browser can't keep cookies, so the map page carries a signed,
+# expiring token in its URL (?t=...) instead of the password. The signature also
+# covers the user's password hash, so changing/resetting the password kills old links.
+def _token_sig(payload: str, pw_hash) -> str:
+    msg = f"{payload}|{pw_hash}".encode("utf-8")
+    return hmac.new(SESSION_SECRET.encode(), msg, hashlib.sha256).hexdigest()
+
+
+def make_token(user: dict) -> str:
     expires = str(int(time.time()) + SESSION_MAX_AGE)
-    payload = f"{name}|{expires}"
-    sig = hmac.new(SESSION_SECRET.encode(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"{payload}|{sig}"
+    payload = f"{user['name']}|{expires}"
+    raw = f"{payload}|{_token_sig(payload, user.get('pw'))}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-def read_session(token) -> str | None:
+def read_token(token) -> dict | None:
+    """Return the user for a valid, unexpired token, else None."""
     if not token:
         return None
     try:
-        name, expires, sig = token.rsplit("|", 2)
-    except ValueError:
-        return None
-    payload = f"{name}|{expires}"
-    expected = hmac.new(SESSION_SECRET.encode(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
+        name, expires, sig = raw.rsplit("|", 2)
+    except (ValueError, UnicodeDecodeError):
         return None
     if not expires.isdigit() or int(expires) < time.time():
         return None
-    return name
-
-
-def set_session_cookie(response: Response, name: str) -> None:
-    response.set_cookie(
-        SESSION_COOKIE,
-        make_session(name),
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-        secure=not localserver,
-    )
+    user = getUser(name)
+    if user is None:
+        return None
+    if not hmac.compare_digest(sig, _token_sig(f"{name}|{expires}", user.get("pw"))):
+        return None
+    return user
 
 
 ### ADMIN AUTH / FILE NAME SAFETY
@@ -453,9 +453,8 @@ async def check_pw(request: Request, response: Response):
     for user in userdb["users"]:
         if user.get("name") == name:
             if verify_password(pw, user.get("pw")):
-                # log in via a signed HttpOnly cookie instead of putting the password in the URL
-                set_session_cookie(response, name)
-                return {"message": "CORRECT", "data": {"name": name}}
+                # hand back a signed login token; the page puts it in the map URL instead of the password
+                return {"message": "CORRECT", "data": {"name": name, "token": make_token(user)}}
             else:
                 return {"message": "WRONG PW"}
 
@@ -628,25 +627,29 @@ async def showclients():
     #print("clients:", clients)
     return json.dumps(clients)
 
+def map_url(user: dict) -> str:
+    return f"{serverURL}/cloudbase1337?t={make_token(user)}"
+
+
 @app.get("/cloudbase1337", response_class=HTMLResponse)
-async def multiplayermap(request: Request):
+async def multiplayermap(request: Request, t: str = ""):
     taskfiles = os.listdir(tasks_path)
-    name = read_session(request.cookies.get(SESSION_COOKIE))
-    thisuser = getUser(name) if name else None
+    thisuser = read_token(t)
     if thisuser is None:
         return templates.TemplateResponse("login.html", {"request": request, "json_data":  {"tasks":taskfiles, "serverURL":serverURL}})
-    return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":public_user(thisuser), "livetask":5, "serverURL":serverURL, "serverWS":serverWS}})
+    user = public_user(thisuser)
+    user["token"] = t
+    return templates.TemplateResponse("client.html", {"request": request, "json_data": {"tasks":taskfiles, "user":user, "livetask":5, "serverURL":serverURL, "serverWS":serverWS}})
 
 
 @app.get("/cloudbase1337/{name}/{pw}", response_class=HTMLResponse)
 async def multiplayermap_legacy(request: Request, name: str, pw: str):
     """Old link format with the password in the URL. Kept so existing links/clients
-    still work: log in, set the session cookie and redirect to the clean URL."""
-    if searchUser(name, pw) is None:
+    still work: check the password once, then redirect to the token URL."""
+    thisuser = searchUser(name, pw)
+    if thisuser is None:
         return RedirectResponse(url=f"{serverURL}/cloudbase1337", status_code=303)
-    redirect = RedirectResponse(url=f"{serverURL}/cloudbase1337", status_code=303)
-    set_session_cookie(redirect, name)
-    return redirect
+    return RedirectResponse(url=map_url(thisuser), status_code=303)
 
 
 @websocket_handler("GAMESERVER_CLIENT_UPDATE_STATE", HandlerType.SERVER)

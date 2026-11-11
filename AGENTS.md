@@ -13,7 +13,9 @@ browser assets in `static/`.
 - Production mode is enabled by setting `PERSISTANT_PATH` (storage dir for
   `users.json`, `userskins/`, `tasks/`, `tracks/`).
 - Required env vars in production: `ADMIN_TOKEN` (admin panel is disabled
-  without it), `SESSION_SECRET` (signs login cookies), `MAIL_PASSWORD`.
+  without it), `SESSION_SECRET` (signs login tokens), `MAIL_PASSWORD`.
+- The Unreal in-game browser does not support cookies: login state is passed
+  as a signed token in the URL (`/cloudbase1337?t=...`), never the password.
 - Never commit `users.json` or `.env`: they hold user data and secrets.
 
 ## Model usage
