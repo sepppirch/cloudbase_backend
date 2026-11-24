@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Plotly Animated Racehorse Rankings</title>
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+<style>
+  body { font-family: sans-serif; padding: 20px; }
+</style>
+</head>
+
+<body>
+
+<h2>Animated Plotly Racehorse Rankings</h2>
+<div id="chart" style="width:700px;height:450px;"></div>
+
+<script>
+// --------------------------------------------------
+// Horse list
+// --------------------------------------------------
+let horses = [
+  "Secretariat",
+  "Seabiscuit",
+  "Man o' War",
+  "Zenyatta",
+  "Red Rum"
+];
+
+// Create initial random scores
+let scores = horses.map(() => Math.random() * 100);
+
+// --------------------------------------------------
+// Returns sorted arrays (descending rank)
+// --------------------------------------------------
+function getSortedData() {
+  const pairs = horses.map((h, i) => ({ horse: h, score: scores[i] }));
+  pairs.sort((a, b) => b.score - a.score);
+  return {
+    horses: pairs.map(p => p.horse),
+    scores: pairs.map(p => p.score)
+  };
+}
+
+let sorted = getSortedData();
+
+// --------------------------------------------------
+// INITIAL PLOT
+// --------------------------------------------------
+Plotly.newPlot("chart", [{
+  type: "bar",
+  orientation: "h",
+  x: sorted.scores,
+  y: sorted.horses,
+  marker: { color: "#4f8cff" }
+}], {
+  title: "Racehorse Rankings (Auto-Animated)",
+  xaxis: { title: "Score", range: [0, 100] },
+  yaxis: { automargin: true },
+  transition: { duration: 800 },
+  frame: { duration: 800 },
+});
+
+
+// --------------------------------------------------
+// UPDATE ANIMATION FUNCTION
+// --------------------------------------------------
+function animateNewOrder() {
+  // randomize scores
+  scores = horses.map(() => Math.random() * 100);
+  const newSorted = getSortedData();
+
+  Plotly.animate("chart", {
+    data: [{
+      x: newSorted.scores,
+      y: newSorted.horses
+    }]
+  }, {
+    transition: {
+      duration: 900,
+      easing: "cubic-in-out"
+    },
+    frame: {
+      duration: 900
+    }
+  });
+}
+
+// --------------------------------------------------
+// Trigger reorder + animation every 3 seconds
+// --------------------------------------------------
+setInterval(animateNewOrder, 3000);
+
+</script>
+</body>
+</html>

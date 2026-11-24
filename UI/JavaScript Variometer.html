@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<!-- saved from url=(0039)https://chocolate-silvie-88.tiiny.site/ -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+<style>
+    .check_box {
+    	display:none;
+    }
+
+    .check_box + label{
+    	background:url('mute.png') no-repeat;
+    	height: 64px;
+    	width: 64px;
+    	display:inline-block;
+        padding: 0 0 0 0px;
+    }
+
+    .check_box:checked + label{
+        background:url('loud.png') no-repeat;
+    	height: 64px;
+    	width: 64px;
+    	display:inline-block;
+        padding: 0 0 0 0px;
+    }
+</style>
+<div style="background:black; height:100%;">
+  <input type="range" min="0" max="10" value="0" class="slider" id="volume">
+  <input type="range" min="-5" max="5" value="0" class="slider" id="climbrate">
+	<input type="checkbox" id="myCheck"  class="check_box">
+</div>
+    <script>
+        
+
+
+            // --- Configuration ---
+            const MAX_VS = 10; // Max vertical speed in m/s
+            const MIN_VS = -10; // Min vertical speed in m/s
+            const INERTIA_FACTOR = 0.05; // Smoothing factor for needle movement
+            let currentVS = 0;
+            let targetVS = 0;
+            // --- Audio Setup ---
+            let audioCtx;
+            let oscillator;
+            let gainNode;
+            let userInteracted = false;
+            let soundState = 'silent'; // Can be 'silent', 'lifting', 'sinking'
+            let beepTimeout = null;
+            let vol = 0;
+            let climbrate = 0;
+            let pressInterval = null;
+
+            function setupAudio() {
+                try {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    oscillator = audioCtx.createOscillator();
+                    gainNode = audioCtx.createGain();
+
+                    oscillator.type = 'sine';
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+                    oscillator.start();
+                } catch (e) {
+                    console.error("Web Audio API is not supported in this browser");
+                }
+            }
+
+            function manageAudio(vs) {
+                if (!audioCtx) return;
+
+                const LIFT_THRESHOLD = 0.2;
+                const SINK_THRESHOLD = -2.0;
+                let newState = 'silent';
+
+                if (vs > LIFT_THRESHOLD) {
+                    newState = 'lifting';
+                } else if (vs < SINK_THRESHOLD) {
+                    newState = 'sinking';
+                }
+
+                if (newState !== soundState) {
+                    // State has changed, so stop current sound and start new one
+                    clearTimeout(beepTimeout);
+                    beepTimeout = null;
+                    gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+                    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+
+                    soundState = newState;
+
+                    if (soundState === 'lifting') {
+                        scheduleBeep(vs);
+                    } else if (soundState === 'sinking') {
+                        oscillator.frequency.setValueAtTime(220, audioCtx.currentTime);
+                        gainNode.gain.setValueAtTime(vol, audioCtx.currentTime);
+                    }
+                }
+            }
+            
+            function scheduleBeep(vs) {
+                if (!audioCtx || soundState !== 'lifting') return;
+
+                // Calculate pitch based on climb rate
+                const baseFreq = 500;
+                const maxFreq = 2000;
+                const freq = baseFreq + (vs / MAX_VS) * (maxFreq - baseFreq);
+                oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+
+                // Calculate interval between beeps
+                const baseInterval = 1000;
+                const minInterval = 200;
+                const interval = baseInterval - (vs / MAX_VS) * (baseInterval - minInterval);
+                const beepDuration = 200;
+
+                // Play a single beep
+                gainNode.gain.setValueAtTime(vol, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0, audioCtx.currentTime + beepDuration / 1000);
+
+                // Schedule the next beep
+                beepTimeout = setTimeout(() => scheduleBeep(currentVS), interval);
+            }
+
+
+            // --- Animation Loop ---
+
+            function animate() {
+                const diff = targetVS - currentVS;
+                if (Math.abs(diff) > 0.01) {
+                    currentVS += diff * INERTIA_FACTOR;
+                } else {
+                    currentVS = targetVS;
+                }    
+                manageAudio(currentVS);
+                requestAnimationFrame(animate);
+            }
+
+            // --- Event Listeners ---
+            
+			var slider = document.getElementById("volume");
+
+			slider.oninput = function() {
+			  startChange(climbrate);
+              vol = this.value/50;
+			  stopChange;
+			}
+
+            var slider1 = document.getElementById("climbrate");
+
+			slider1.oninput = function() {
+			  climbrate = this.value;
+              startChange(climbrate);
+              
+			  stopChange;
+			  
+			}
+
+            const startChange = (direction) => {
+                // On first user interaction, resume audio context if needed
+                if (!userInteracted && audioCtx && audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+                userInteracted = true;
+
+                if (pressInterval) return;
+                pressInterval = setInterval(() => {
+                    targetVS = direction ;
+                    targetVS = Math.max(MIN_VS, Math.min(MAX_VS, targetVS));
+                }, 50);
+            };
+
+            const stopChange = () => {
+                clearInterval(pressInterval);
+                pressInterval = null;
+            };
+
+            document.addEventListener('mouseup', stopChange);
+            // --- Initialization ---
+            setupAudio();
+            animate();
+        
+    </script>
+
+
+</body></html>

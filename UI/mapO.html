@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<title>Full Screen Leaflet Map</title>
+	<meta charset="utf-8" />
+
+	<style>
+		body {
+			padding: 0;
+			margin: 0;
+			overflow: hidden;
+		}
+
+		html,
+		body,
+		#map {
+			height: 1000px;
+			width: 1500px;
+		}
+
+		.my-div-icon {
+			font-size: 14px;
+		}
+	</style>
+</head>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+	integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+	integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<body>
+
+	<button onclick="loadCoords()">Load GPX</button>
+	<button onclick="makeCylinder()">MAKE Cylinder</button>
+	<input type="file" id="file-selector" accept=".igc" multiple>
+	<div id="text">TEXT</div>
+	<div id="map" width="1000px"></div>
+
+
+	<script src="leaflet.rotatedMarker.js"></script>
+	<script src="demo.js"></script>
+	<script src="gpx.js"></script>
+	<script src="pgSpots.js"></script>
+	<script src="airports.js"></script>
+	<script src="tasks.js"></script>
+	<script src="igcParser.js"></script>
+	<script src="grid.js"></script>
+	<script src="sectors.js"></script>
+	<script src="airspace.js"></script>
+	<script>
+		/// UE4 connection
+
+		"object" != typeof ue || "object" != typeof ue.interface ? ("object" != typeof ue && (ue = {}), ue.interface = {}, ue.interface.broadcast = function (e, t) {
+			if ("string" == typeof e) {
+				var o = [e, ""];
+				void 0 !== t && (o[1] = t);
+				var n = encodeURIComponent(JSON.stringify(o));
+				"object" == typeof history && "function" == typeof history.pushState ? (history.pushState({}, "", "#" + n), history.pushState({}, "", "#" + encodeURIComponent("[]"))) : (document.location.hash = n, document.location.hash = encodeURIComponent("[]"))
+			}
+		}) : function (e) {
+			ue.interface = {},
+				ue.interface.broadcast = function (t, o) {
+					"string" == typeof t && (void 0 !== o ? e.broadcast(t, JSON.stringify(o)) : e.broadcast(t, ""))
+				}
+		}
+
+
+			(ue.interface), (ue4 = ue.interface.broadcast);
+
+
+		function test(point, vs) {
+			// ray-casting algorithm based on
+			// http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html
+
+			var x = point[0], y = point[1];
+
+			var inside = false;
+			for (var i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+				var xi = vs[i][0], yi = vs[i][1];
+				var xj = vs[j][0], yj = vs[j][1];
+
+				var intersect = ((yi > y) != (yj > y))
+					&& (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+				if (intersect) inside = !inside;
+			}
+
+			return inside;
+		};
+
+		////  API DEFENITION
+		//// DONT TOUCH THIS FILE
+		function logger(message) {
+			console.log(message);
+			ue4("log", message);
+
+		};
+
+
+
+		function getRandomColor() {
+			var letters = '0123456789ABCDEF';
+			var color = '#';
+			for (var i = 0; i < 6; i++) {
+				color += letters[Math.floor(Math.random() * 16)];
+			}
+			return color;
+		}
+
+
+		function checkTask(coord){
+			var target = L.latLng(tasks["tasks"][0]["cylinder"][tp]["lat"], tasks["tasks"][0]["cylinder"][tp]["lon"]);
+
+			console.log(tasks["tasks"][0]["cylinder"][0]["rad"])
+			var dist = coord.distanceTo(target);
+			console.log(dist)
+			//document.getElementById("text").innerHTML = checkAirSpace(testcoords);
+
+			if (tp == 0) {
+				if (dist > tasks["tasks"][0]["cylinder"][tp]["rad"]) {
+					cylinders[tp].setStyle({ color: "#00FF00", fillColor: "#00ff00" });
+					tp++;
+				}
+			} else {
+				if (dist < tasks["tasks"][0]["cylinder"][tp]["rad"]) {
+					cylinders[tp].setStyle({ color: "#00FF00", fillColor: "#00ff00" });
+
+					tp++;
+					if (cylinders.length == tp) {
+						console.log("finish")
+					}
+				}
+			}
+			console.log(tp)
+
+		}
+
+		function checkAirSpace(coord) {
+			outstring = "ok"
+			for (let i = 0; i < airspace["features"].length; i++) {
+
+				if (airspace["features"][i]["geometry"]["type"] == "MultiPolygon") {
+					//console.log("contains")
+					//
+					for (let j = 0; j < airspace["features"][i]["geometry"]["coordinates"][0].length; j++) {
+						if (test([coord["lon"], coord["lat"]], airspace["features"][i]["geometry"]["coordinates"][0][j]) == true) {
+							//console.log("clicked " +airspace["features"][i]["properties"]["id"] + "  "+ airspace["features"][i]["properties"]["low"] + " - " + airspace["features"][i]["properties"]["up"]);
+							if (coord["alt"] > airspace["features"][i]["properties"]["low"] && coord["alt"] < airspace["features"][i]["properties"]["up"]) {
+								outstring = (airspace["features"][i]["properties"]["Name"] + "  " + airspace["features"][i]["properties"]["low"] + " - " + airspace["features"][i]["properties"]["up"]);
+							}
+						}
+
+					}
+
+
+				} else {
+					if (test([coord["lon"], coord["lat"]], airspace["features"][i]["geometry"]["coordinates"][0]) == true) {
+						//console.log("clicked " +airspace["features"][i]["properties"]["id"] + "  "+ airspace["features"][i]["properties"]["low"] + " - " + airspace["features"][i]["properties"]["up"]);
+						if (coord["alt"] > airspace["features"][i]["properties"]["low"] && coord["alt"] < airspace["features"][i]["properties"]["up"]) {
+							outstring = (airspace["features"][i]["properties"]["id"] + "  " + airspace["features"][i]["properties"]["low"] + " - " + airspace["features"][i]["properties"]["up"]);
+						}
+					}
+
+				}
+
+			}
+			return outstring;
+		}
+
+		const fileSelector = document.getElementById('file-selector');
+		fileSelector.addEventListener('change', (event) => {
+
+			const fileList = event.target.files;
+
+
+			for (let file = 0; file < fileList.length; file++) {
+				const reader = new FileReader();
+				reader.addEventListener('load', (event) => {
+					console.log(fileList.length);
+
+
+					let flight = new Flight("flight");
+					flight.load_file(event.target.result, '.' + fileList[file].name.split('.').pop().toLowerCase());
+
+					var latlngs = [];//for drawing on map
+					var newcoords = { "points": [] }; //for ue4
+
+					for (const key in flight["paragliding_info"]) {
+
+						if(flight["paragliding_info"][key].latitude != undefined){
+							latlngs.push([flight["paragliding_info"][key].latitude, flight["paragliding_info"][key].longitude]);
+
+							var thispoint = { "lat": flight["paragliding_info"][key].latitude, "lon": flight["paragliding_info"][key].longitude, "ele": flight["paragliding_info"][key].gpsAltitude, "time": flight["paragliding_info"][key].time.toString() };
+							newcoords["points"].push(thispoint);
+						}
+					}
+
+					console.log(latlngs);
+
+					geo = L.polyline(latlngs, { color: getRandomColor(), weight: 2 });
+					geo.addTo(map);
+					ue4("gpx", newcoords);
+
+
+
+				});
+				reader.readAsText(fileList[file]);
+			}
+
+			/*	
+				
+					file = f;
+					reader.readAsText(fileList[file]);
+				}
+				*/
+		});
+
+		var lat = 47.00;
+		var lon = 11.00;
+		var cylinders = []
+
+		var PlaneIcon = L.icon({
+			iconUrl: 'plane.png',
+			shadowUrl: 'plane_shadow.png',
+			iconSize: [64, 64], // size of the icon
+			shadowSize: [64, 64], // size of the shadow
+			iconAnchor: [32, 32], // point of the icon which will correspond to marker's location
+			shadowAnchor: [32, 32],  // the same for the shadow
+			popupAnchor: [-3, -76] // point from which the popup should open relative to the iconAnchor
+		});
+
+
+
+		var map = L.map('map').setView([lat, lon], 7);
+		mapLink =
+			'<a href="http://openstreetmap.org">OpenStreetMap</a>';
+		L.tileLayer(
+			'http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+			attribution: '&copy; ' + mapLink + ' Contributors',
+			maxZoom: 20,
+		}).addTo(map);
+
+		var cylinder1 = L.circle([lat, lon], 1000).addTo(map);
+		var target = L.latLng(lat, lon);
+		var coord = L.latLng(lat, lon);
+		//var TMarker = L.circle([lat,lon], 100).addTo(map);
+		var TMarker = L.marker(target).addTo(map);
+		var plane = L.marker(target, { icon: PlaneIcon, rotationAngle: 45 }).addTo(map);
+		var tp = 0;
+		console.log(tasks[0])
+
+		map.on('click', function (e) {
+			coord = e.latlng;
+			TMarker.setLatLng(e.latlng);
+			//var target = L.latLng(coord.lat, coord.lng);
+			//
+
+			ue4("coords", coord)
+			var text = document.getElementById("text");
+			text.innerHTML = lat;
+			//console.log(coord);
+			testcoords = { "lat": coord["lat"], "lon": coord["lng"], "alt": 2000 };
+			//console.log(checkAirSpace(testcoords));
+			checkTask(coord)
+
+		});
+
+		var WindsockIcon = L.icon({
+
+			iconUrl: 'Windsack.png',
+			shadowUrl: 'Windsack_Shadow.png',
+			iconSize: [58, 39],
+			shadowSize: [58, 39],
+			iconAnchor: [29, 20],
+			shadowAnchor: [29, 20],
+			popupAnchor: [0, -29]
+
+		});
+
+
+
+		for (let i = 0; i < pgSpots["features"].length; i++) {
+			L.marker([pgSpots["features"][i]["geometry"]["coordinates"][1], pgSpots["features"][i]["geometry"]["coordinates"][0]], { icon: WindsockIcon }).addTo(map).bindPopup(pgSpots["features"][i]["properties"]["name"]);
+		}
+
+		var AirportIcon = L.icon({
+
+			iconUrl: 'airport.png',
+			shadowUrl: 'airport_Shadow.png',
+			iconSize: [64, 64],
+			shadowSize: [64, 64],
+			iconAnchor: [32, 32],
+			shadowAnchor: [32, 32],
+			popupAnchor: [0, -29]
+
+		});
+		/*
+			for (let i=0; i< airports["features"].length; i++) {
+				L.marker([airports["features"][i]["geometry"]["coordinates"][1],airports["features"][i]["geometry"]["coordinates"][0]], {icon: AirportIcon}).addTo(map).bindPopup(airports["features"][i]["properties"]["name"]);
+			}
+				*/
+		//tilegrid
+		var style1 = {
+			strokewidth: 1,
+			opacity: 1,
+			color: "#0000ff",
+			weight: 1
+		};
+
+
+		var style2 = {
+			strokewidth: 1,
+			opacity: 0.2,
+			color: "#ff0000",
+			weight: 1
+		};
+
+		
+		
+			L.geoJSON(sectors["features"], {
+				onEachFeature: function (feature, layer) {
+						layer.bindTooltip(feature.name, {permanent: true, offset: [0, 0] });
+				},
+				style: {color: "#00ff00" ,  fillOpacity: 0.3, strokewidth: 4}
+				
+			}).addTo(map);
+		
+
+		var airspacelayer = L.geoJSON(airspaceLines["features"], style1).addTo(map);
+		var airspacelayer1 = L.geoJSON(airspaceCTR["features"], style2).addTo(map);
+		//console.log(test([15.605318780979989 ,48.011861716026665 ],airspace["features"][1]["geometry"]["coordinates"][0][0]))
+
+
+		
+		L.geoJSON(grid["features"], {
+			onEachFeature: function (feature, layer) {
+					layer.bindTooltip(feature.properties.name);
+			},
+			style: function(feature) {
+					switch (feature.properties.stl) {
+						case 0: return {color: "#ff00ff", fillOpacity: 0.0, strokewidth: 1};
+						case 1:   return {color: "#0000ff", fillOpacity: 0.0, strokewidth: 1};
+					}
+	
+			}
+		}).addTo(map);
+	
+	
+	
+				
+		var WindsockIcon = L.icon({
+			iconUrl: 'Windsack.png',
+			shadowUrl: 'plane_shadow.png',																														
+			iconSize:     [58, 39], // size of the icon
+			shadowSize:   [64, 64], // size of the shadow
+			iconAnchor:   [29, 39], // point of the icon which will correspond to marker's location
+			shadowAnchor: [32, 32],  // the same for the shadow
+			popupAnchor:  [-3, -76] // point from which the popup should open relative to the iconAnchor
+		});
+	
+
+
+
+
+		function updateMap(coords) {
+			//var lat = 45.003;
+			//var lon = 8.6679;
+			var lat = coords.lat;
+			var lon = coords.lon;
+			map.setView(new L.LatLng(lat, lon), 14);
+			var target = L.latLng(lat, lon);
+			plane.setLatLng(target);
+			plane.setRotationAngle(coords.rot);
+
+
+		};
+
+
+
+		function makeCylinder() {
+
+			var thisline = [];
+			for (let i = 0; i < tasks["tasks"][0]["cylinder"].length; i++) {
+				var style = { fillColor: "#0000ff", fillOpacity: 0.2, color: "#0000FF" };
+				var taskcoords = [tasks["tasks"][0]["cylinder"][i]["lat"], tasks["tasks"][0]["cylinder"][i]["lon"]]
+				var cylinder = new L.circle(taskcoords, tasks["tasks"][0]["cylinder"][i]["rad"]);
+
+				cylinders.push(cylinder)
+				cylinder.setStyle(style)
+				thisline.push(taskcoords);
+
+				cylinder.addTo(map);
+				var ttext = "START";
+				if (i > 0) {
+					ttext = i;
+				}
+				if (i > (tasks["tasks"][0]["cylinder"].length - 2)) {
+					ttext = "GOAL";
+				}
+
+				var myIcon = L.divIcon({ className: 'my-div-icon', html: ttext });
+				// you can set .my-div-icon styles in CSS
+				L.marker(taskcoords, { icon: myIcon }).addTo(map);
+
+			}
+
+
+			L.polyline(thisline).addTo(map);
+			map.setView([thisline[0][0], thisline[0][1]], 12);
+			ue4("task", tasks["tasks"][0]);
+			console.log(tasks["tasks"][0])
+		}
+
+		ue.interface.coords = function (data) {
+			x = JSON.parse(data);
+			var text = document.getElementById("text");
+			text.innerHTML = x.lat.toString() + ", " + x.lon.toString();
+			updateMap(x)
+			//logger(data);
+		};
+
+
+
+		function loadCoords() {
+
+			var gpx = gpxtrack; // URL to your GPX file or the GPX itself
+			var thistrack = new L.GPX(gpx, { async: false }).on('loaded', function (e) {
+				map.fitBounds(e.target.getBounds());
+			}).addTo(map);
+			console.log(thistrack.get_elevation_max());
+			console.log(thistrack.get_distance() / 1000);
+
+			var newcoords = { "points": [] };
+
+			for (let i = 0; i < thiscoords.length; i++) {
+				var thispoint = { "lat": thiscoords[i]["lat"], "lon": thiscoords[i]["lng"], "ele": thiscoords[i]["meta"]["ele"], "time": thiscoords[i]["meta"]["time"].toString() };
+				newcoords["points"].push(thispoint);
+			}
+			ue4("gpx", newcoords);
+			//console.log(thiscoords[0]["meta"]["time"]);
+			//console.log(newcoords["points"][0]["time"]);
+
+		};
+
+	</script>

@@ -1,0 +1,394 @@
+<script>
+    class mcBezier extends HTMLElement {
+        constructor() {
+            super();
+        }
+        connectedCallback() {
+            let template = document.querySelector('#mcB-template').content;
+            this.attachShadow({ mode: 'open' }).appendChild(template.cloneNode(true));
+
+            var name = this.getAttribute('name');
+
+            var xmin = parseFloat(this.getAttribute('xmin'));
+            var xmax = parseFloat(this.getAttribute('xmax'));
+
+            var ymin = parseFloat(this.getAttribute('ymin'));
+            var ymax = parseFloat(this.getAttribute('ymax'));
+            var p0x = this.getAttribute('p0x');
+            var p0y = this.getAttribute('p0y');
+            var p1x = this.getAttribute('p1x');
+            var p1y = this.getAttribute('p1y');
+            var p2x = this.getAttribute('p2x');
+            var p2y = this.getAttribute('p2y');
+            var p3x = this.getAttribute('p3x');
+            var p3y = this.getAttribute('p3y');
+            var p4x = this.getAttribute('p4x');
+            var p4y = this.getAttribute('p4y');
+            var p5x = this.getAttribute('p5x');
+            var p5y = this.getAttribute('p5y');
+            var p6x = this.getAttribute('p6x');
+            var p6y = this.getAttribute('p6y');
+            //let name_button = this.shadowRoot.querySelector("#name");
+            let this_canvas = this.shadowRoot.querySelector("#myCanvas");
+            this_canvas.style.background = "url('grid.png')";
+            let label = this.shadowRoot.querySelector("#name");
+            label.innerHTML = name;
+
+
+            let yaxis = this.shadowRoot.querySelector("#yaxis");
+            yaxis.innerHTML = this.getAttribute('yaxis');
+            let yaxisL0 = this.shadowRoot.querySelector("#yaxisL0");
+            yaxisL0.innerHTML = ymin;
+            let yaxisL1 = this.shadowRoot.querySelector("#yaxisL1");
+            yaxisL1.innerHTML = ymin + (ymax - ymin) / 2;
+            let yaxisL2 = this.shadowRoot.querySelector("#yaxisL2");
+            yaxisL2.innerHTML = ymax;
+
+            let xaxis = this.shadowRoot.querySelector("#xaxis");
+            xaxis.innerHTML = this.getAttribute('xaxis');
+            let xaxisL0 = this.shadowRoot.querySelector("#xaxisL0");
+            xaxisL0.innerHTML = xmin;
+            let xaxisL1 = this.shadowRoot.querySelector("#xaxisL1");
+            xaxisL1.innerHTML = xmin + (xmax - xmin) / 2;
+            let xaxisL2 = this.shadowRoot.querySelector("#xaxisL2");
+            xaxisL2.innerHTML = xmax;
+
+
+
+
+
+            //document.getElementById("nextTP").innerHTML = rtimestr 
+            var c = this_canvas;
+            //var points = [198.470261, 195.236755, 189.973984, 186.208008, 182.249985, 175.979248, 171.59375, 167.058258, 162.384735, 157.585266, 152.671753, 147.65625, 142.550766, 137.367249, 132.117737, 129.472015, 124.145981, 118.783997, 113.39801, 108.000008, 102.60202, 99.906754, 94.53125, 89.185745, 83.88224, 78.632751, 76.032005, 70.885994, 65.824005, 60.858006, 58.414757, 53.615242, 48.941753, 44.406254, 40.020741, 35.797256, 33.75, 29.791996, 26.025999, 22.464001, 19.118004, 15.999999, 13.122001, 10.496004, 8.133999, 6.048, 3.462748, 2.11925, 1.09375, 0.178, 2.99975, 8.99325, 17.945999, 23.872002, 29.749998, 38.450752, 44.156254, 49.771751, 55.285248, 60.684746, 65.958252, 71.09375, 76.079262, 80.902756, 85.552246, 87.807999, 92.173988, 96.336006, 100.28199, 104.0, 107.478004, 109.123253, 112.21875, 115.044235, 117.587746, 119.837234, 120.847992, 122.634003, 124.095985, 125.222, 125.655258, 126.254753, 126.488251, 126.34375, 125.809235, 124.872742, 124.25, 122.688004, 120.694, 118.256004, 115.362, 112.0, 108.157997, 103.824005, 98.985992, 93.632004, 84.607239, 77.910751, 70.65625, 58.701992];
+            var mousePosition;
+            //track state of mousedown and up
+            var isMouseDown;
+
+
+            //name_button.style.background = this.getAttribute('color');
+            //name_button.style.background = url('images/NotR;ecording.png')
+            var fun = this.getAttribute('fn');
+
+
+            const context = this_canvas.getContext('2d');
+            var ctx = context;
+            //make some circles
+            var c1 = new Circle(p0x, p0y, 8, "blue", "black");
+            var c2 = new Circle(p1x, p1y, 6, "green", "black");
+            var c3 = new Circle(p2x, p2y, 6, "red", "black");
+            var c4 = new Circle(p3x, p3y, 8, "grey", "black");
+            var c5 = new Circle(p4x, p4y, 6, "green", "black");
+            var c6 = new Circle(p5x, p5y, 6, "green", "black");
+            var c7 = new Circle(p6x, p6y, 8, "blue", "black");
+            //initialise our circles
+            var circles = [c1, c2, c3, c4, c5, c6, c7];
+            var xoff = c3.x - c4.x;
+            var yoff = c3.y - c4.y;
+            var x1off = c5.x - c4.x;
+            var y1off = c5.y - c4.y;
+            c.addEventListener('mousemove', move, false);
+            c.addEventListener('mousedown', setDraggable, false);
+            c.addEventListener('mouseup', setDraggable, false);
+            c.addEventListener('click', () => {
+                //console.log('select ' + this.getAttribute('name'));
+                this.setAttribute('p0x', c1.x);
+                this.setAttribute('p0y', c1.y);
+                this.setAttribute('p1x', c2.x);
+                this.setAttribute('p1y', c2.y);
+                this.setAttribute('p2x', c3.x);
+                this.setAttribute('p2y', c3.y);
+                this.setAttribute('p3x', c4.x);
+                this.setAttribute('p3y', c4.y);
+                this.setAttribute('p4x', c5.x);
+                this.setAttribute('p4y', c5.y);
+                this.setAttribute('p5x', c6.x);
+                this.setAttribute('p5y', c6.y);
+                this.setAttribute('p6x', c7.x);
+                this.setAttribute('p6y', c7.y);
+
+                //socket.emit('ex', { usr:uid, msg: this.getAttribute('name'), id: this.getAttribute('parent'),val: this.getAttribute('val'),  fn: fun});
+            });
+            function draw() {
+                //clear canvas
+
+                ctx.clearRect(0, 0, c.width, c.height);
+
+                ctx.beginPath();
+                ctx.moveTo(c1.x, c1.y);
+                ctx.bezierCurveTo(c2.x, c2.y, c3.x, c3.y, c4.x, c4.y);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(c4.x, c4.y);
+                ctx.bezierCurveTo(c5.x, c5.y, c6.x, c6.y, c7.x, c7.y);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.lineWidth = 1;
+                ctx.moveTo(c1.x, c1.y);
+                ctx.lineTo(c2.x, c2.y);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.moveTo(c3.x, c3.y);
+                ctx.lineTo(c4.x, c4.y);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.moveTo(c5.x, c5.y);
+                ctx.lineTo(c4.x, c4.y);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.moveTo(c6.x, c6.y);
+                ctx.lineTo(c7.x, c7.y);
+                ctx.stroke();
+
+
+                drawCircles();
+                xoff = c3.x - c4.x;
+                yoff = c3.y - c4.y;
+                x1off = c5.x - c4.x;
+                y1off = c5.y - c4.y;
+            }
+
+            //draw circles
+            function drawCircles() {
+                for (var i = circles.length - 1; i >= 0; i--) {
+
+                    circles[i].draw();
+
+                }
+            }
+
+            //key track of circle focus and focused index
+            var focused = {
+                key: 0,
+                state: false
+            }
+
+            //circle Object
+            function Circle(x, y, r, fill, stroke) {
+                this.startingAngle = 0;
+                this.endAngle = 2 * Math.PI;
+                this.x = x;
+                this.y = y;
+                this.r = r;
+
+                this.fill = fill;
+                this.stroke = stroke;
+
+                this.draw = function () {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.r, this.startingAngle, this.endAngle);
+                    ctx.fillStyle = this.fill;
+                    ctx.lineWidth = 3;
+                    ctx.fill();
+                    ctx.strokeStyle = this.stroke;
+                    ctx.stroke();
+                }
+            }
+
+            function move(e) {
+                if (!isMouseDown) {
+                    return;
+                }
+                getMousePosition(e);
+                //if any circle is focused
+                if (focused.state) {
+                    if (circles[focused.key]["fill"] == "blue") {
+                        circles[focused.key].y = mousePosition.y;
+                    }
+                    else {
+                        circles[focused.key].x = mousePosition.x;
+                        circles[focused.key].y = mousePosition.y;
+                        if (circles[focused.key]["fill"] == "grey") {
+
+                            c3.x = mousePosition.x + xoff;
+                            c3.y = mousePosition.y + yoff;
+                            c5.x = mousePosition.x + x1off;
+                            c5.y = mousePosition.y + y1off;
+
+                        }
+
+                        if (circles[focused.key]["fill"] == "red") {
+                            c5.x = (c4.x - xoff);
+                            c5.y = (c4.y - yoff);
+                        }
+
+                    }
+
+                    draw();
+                    return;
+                }
+                //no circle currently focused check if circle is hovered
+                for (var i = 0; i < circles.length; i++) {
+                    if (intersects(circles[i])) {
+                        circles.move(i, 0);
+                        focused.state = true;
+                        break;
+                    }
+                }
+                draw();
+            }
+
+            //set mousedown state
+            function setDraggable(e) {
+                var t = e.type;
+                if (t === "mousedown") {
+                    isMouseDown = true;
+                } else if (t === "mouseup") {
+                    isMouseDown = false;
+                    releaseFocus();
+                }
+            }
+
+            function releaseFocus() {
+                focused.state = false;
+            }
+
+            function getMousePosition(e) {
+                var rect = c.getBoundingClientRect();
+                mousePosition = {
+                    x: Math.round(e.x - rect.left),
+                    y: Math.round(e.y - rect.top)
+                }
+            }
+
+            //detects whether the mouse cursor is between x and y relative to the radius specified
+            function intersects(circle) {
+                // subtract the x, y coordinates from the mouse position to get coordinates 
+                // for the hotspot location and check against the area of the radius
+                var areaX = mousePosition.x - circle.x;
+                var areaY = mousePosition.y - circle.y;
+                //return true if x^2 + y^2 <= radius squared.
+                return areaX * areaX + areaY * areaY <= circle.r * circle.r;
+            }
+
+
+
+            Array.prototype.move = function (old_index, new_index) {
+                if (new_index >= this.length) {
+                    var k = new_index - this.length;
+                    while ((k--) + 1) {
+                        this.push(undefined);
+                    }
+                }
+                this.splice(new_index, 0, this.splice(old_index, 1)[0]);
+            };
+            draw();
+            /*
+            for(var i = 0; i < 100; i++){
+                var newcircle = new Circle(i*4, points[i], 2, "blue", "black");
+                newcircle.draw();
+            }
+            */
+        }
+
+    }
+    customElements.define('mc-bezier', mcBezier);
+</script>
+
+
+<template id="mcB-template">
+    <style>
+        button {
+            width: 380px;
+            height: 30px;
+            font-family: 'Future', sans-serif;
+            overflow: hidden;
+            white-space: nowrap;
+            cursor: pointer;
+            box-sizing: border-box;
+            padding: 0px 6px;
+            text-align: left;
+            border-radius: 7px;
+
+            border-bottom-left-radius: 0px;
+            font-size: 24px;
+
+            color: rgb(255, 255, 255);
+            cursor: pointer;
+            background: rgba(66, 66, 66, 255);
+            border: 2px solid transparent;
+
+            text-transform: uppercase;
+        }
+
+        h3 {
+            text-align: center;
+            font-family: "arial";
+            font-weight: lighter;
+            font-size: 16px;
+            border: 0px;
+            width: 100%;
+            margin: 0px;
+            padding: 0px;
+            user-select: none;
+        }
+
+        h4 {
+            text-align: center;
+            font-family: "arial";
+            font-weight: lighter;
+            font-size: 10px;
+            border: 0px;
+            width: 100%;
+            margin: 0px;
+            padding: 0px;
+            user-select: none;
+        }
+
+        h1 {
+            text-align: center;
+            font-family: "arial";
+            font-weight: lighter;
+            font-size: 30px;
+            border: 0px;
+            width: 100%;
+            margin: 0px;
+            padding: 0px;
+            user-select: none;
+        }
+
+        button:hover {
+            border: 2px solid rgb(124, 124, 124);
+            background: rgba(66, 66, 66, 1);
+        }
+
+        button:active {
+            border: 2px solid rgb(190, 190, 190);
+        }
+    </style>
+    <h1 id="name" style="text-align:left;">climbrate at altitude</h1>
+    <div id="container"
+        style="width: auto; height: 30p0x; display: inline-block; padding: 20px 20px; position: relative;">
+        <div>
+            <h3 id="yaxis" style="rotate: -90deg; position: absolute;  left:-210px; float:left; text-align:left; ">CLIMB
+                m/s</h3>
+        </div>
+        <div>
+            <h4 id="yaxisL2" style=" position: absolute; top:110px;  left:425px; float:left; text-align:left; ">4</h4>
+        </div>
+        <div>
+            <h4 id="yaxisL1" style=" position: absolute; top:210px; left:425px; float:left; text-align:left; ">2</h4>
+        </div>
+        <div>
+            <h4 id="yaxisL0" style=" position: absolute; top:310px; left:425px; float:left; text-align:left; ">0</h4>
+        </div>
+        <div>
+            <h4 id="xaxisL0" style=" position: absolute; top:425px; left:20px; float:left; text-align:left; ">0</h4>
+        </div>
+        <div>
+            <h4 id="xaxisL1" style=" position: absolute; top:425px; left:220px; float:left; text-align:left; ">3000</h4>
+        </div>
+        <div>
+            <h4 id="xaxisL2" style=" position: absolute; top:425px; left:420px; float:left; text-align:left; ">6000</h4>
+        </div>
+        <div>
+            <h3 id="xaxis" style="position: absolute; right: 5px; top:0px; float:right; ">ALT m</h3>
+        </div>
+
+        <canvas id="myCanvas" width="400" height="400" style="border:1px solid"></canvas>
+    </div>
+
+</template>

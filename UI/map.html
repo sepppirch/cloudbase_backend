@@ -1,0 +1,589 @@
+
+<!--
+    Must be ES10 compatible because old chromium in unreal.
+    eg. no use of optional chaining, etc
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Game Client</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
+    <style>
+      body,
+      html {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+      }
+      #map {
+        height: 100vh;
+        width: 100%;
+      }
+      .controls {
+        position: absolute;
+        left: 60px;
+        top: 15px;
+        z-index: 1000;
+
+        background: rgba(255, 255, 255, 0.7);
+        padding: 10px;
+        border-radius: 4px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        min-width: 200px;
+      }
+      #nameInput {
+        padding: 5px;
+        margin-right: 10px;
+        width: 120px;
+      }
+      #altInput {
+        padding: 5px;
+        margin-right: 10px;
+        width: 120px;
+      }
+      button {
+        width: 60px;
+        padding: 5px;
+      }
+      .input-group {
+        display: flex;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      #status {
+        margin-top: 5px;
+        font-size: 0.9em;
+      }
+
+      #status.connected {
+        color: #2ecc71;
+      }
+
+      #status.disconnected {
+        color: #e74c3c;
+      }
+      .arrow-marker {
+        font-size: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transform-origin: center center;
+      }
+      .client-list {
+        margin-top: 10px;
+        font-size: 0.9em;
+        max-height: 85vh;
+        overflow-y: auto;
+      }
+      .client-item {
+        display: flex;
+        flex-direction: column;
+        border-bottom: 1px solid #eee;
+        padding: 5px 0;
+      }
+      .client-item:last-child {
+        border-bottom: none;
+      }
+      .client-name {
+        font-weight: bold;
+        margin-bottom: 5px;
+      }
+      .client-details {
+        display: flex;
+        justify-content: space-between;
+        width: 100%;
+        color: #666;
+        font-family: monospace;
+        font-size: 0.9em;
+      }
+      .client-details div {
+        flex: 1;
+      }
+      .input-group label {
+        margin-right: 5px;
+        min-width: 60px;
+        font-family: sans-serif;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    
+    <div class="controls">
+      <div class="input-group">
+        <button id = "centerButton">CENTER</button>
+        <label for="nameInput">Name:</label>
+        <input type="text" id="nameInput" placeholder="Enter your name" />
+        <button id="setNameButton">Set </button>
+      </div>
+      <div id="status">Disconnected</div>
+      <div class="client-list" id="clientList"></div>
+    </div>
+
+    <div id="map"></div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      crossorigin=""
+    ></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet.marker.slideto@0.2.0/Leaflet.Marker.SlideTo.js"></script>
+    <script>
+      (() => {
+        // Constants
+        const CONFIG = {
+          WS_URL: "wss://jetskeee.com:8765/ws",
+          MAP: {
+            DEFAULT_VIEW: [48.2082, 16.3738],
+            DEFAULT_ZOOM: 13,
+            CIRCLE_RADIUS: 10000, // 100 km
+            SLIDE_DURATION: 200, // ms for position update animation
+          },
+        };
+
+        // State
+        const state = {
+          ws: null,
+          map: null,
+          myMarker: null,
+          myCircle: null,
+          markers: {},
+          rot_z: 90,
+          alt: 500,
+        };
+
+        // Make state accessible globally
+        window.gameState = state;
+
+        // WebSocket handlers
+        const WSClient = {
+          connect() {
+            state.ws = new window.WebSocket(CONFIG.WS_URL);
+            state.ws.onopen = () => UI.updateStatus("Connected");
+            state.ws.onclose = () => {
+              UI.updateStatus("Disconnected");
+              // Reset state of other clients, we can keep our own state
+              state.markers = {};
+              setTimeout(WSClient.connect, 5000);
+            };
+            state.ws.onmessage = this.handleMessage;
+          },
+
+          handleMessage(event) {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.event_name === "GAMESERVER_NEARBY_UPDATE") {
+                Markers.updateNearbyClients(data.payload.nearby_clients);
+                ue4("mpclients", data.payload.nearby_clients);
+              }
+            } catch (error) {
+              console.error("Error parsing WebSocket message:", error);
+            }
+          },
+
+          send(message) {
+            if (state.ws && state.ws.readyState === window.WebSocket.OPEN) {
+              state.ws.send(JSON.stringify(message));
+            }
+          },
+        };
+
+        // UI handlers
+        const UI = {
+          updateStatus(status) {
+            const statusElement = document.getElementById("status");
+            if (statusElement) {
+              statusElement.textContent = status;
+              statusElement.className = status.toLowerCase();
+            }
+          },
+
+          setName() {
+            const nameInput = document.getElementById("nameInput");
+            const name = nameInput.value.trim();
+            if (name) {
+              WSClient.send({
+                event_name: "GAMESERVER_CLIENT_SETNAME",
+                to: "others",
+                payload: { name },
+              });
+            }
+          },
+
+          centerMap(){
+            console.log("reeeee")
+            if (state.myMarker) {
+              state.map.setView(state.myMarker.getLatLng());
+            }
+          },
+
+
+          initEventListeners() {
+            const setNameButton = document.getElementById("setNameButton");
+            setNameButton.addEventListener("click", () => {
+              this.setName();
+            });
+
+            const setCenterButton = document.getElementById("centerButton");
+            setCenterButton.addEventListener("click", () => {
+              this.centerMap();
+            });
+
+          },
+        };
+
+        // Map handlers
+        const Map = {
+          init() {
+            state.map = L.map("map").setView(
+              CONFIG.MAP.DEFAULT_VIEW,
+              CONFIG.MAP.DEFAULT_ZOOM,
+            );
+            L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+              maxZoom: 19,
+            }).addTo(state.map);
+
+            // Initialize your marker at default view position
+            Markers.updatePosition({
+              lat: CONFIG.MAP.DEFAULT_VIEW[0],
+              lng: CONFIG.MAP.DEFAULT_VIEW[1],
+            });
+
+            state.map.on("click", this.onClick);
+          },
+
+          onClick(e) {
+            if (state.tpMarker) {
+              state.tpMarker.setLatLng(e.latlng);
+            } else {
+              state.tpMarker = L.marker(e.latlng, {
+                icon: L.divIcon({
+                  html: '<div style="color: green; font-size: 24px;">📍</div>',
+                  className: "",
+                  iconSize: [24, 24],
+                  iconAnchor: [12, 24],
+                }),
+              }).addTo(state.map);
+
+              // Create popup content with altitude controls
+              const popupContent = document.createElement('div');
+              popupContent.className = 'input-group';
+              popupContent.style.margin = '5px 0';
+              popupContent.innerHTML = `
+                <label for="altInput">Altitude:</label>
+                <input type="number" id="altInput" value="${state.alt}" style="width: 80px; margin: 0 5px;" />
+                <button id="tpButton">TP</button>
+              `;
+
+              // Add click handler directly to the popup content
+              popupContent.querySelector('#tpButton').onclick = () => {
+                const nm = popupContent.querySelector('#altInput');
+                const newAlt = parseInt(altInput.value, 10);
+                if (!isNaN(newAlt)) {
+                  state.alt = newAlt;
+                  const pos = state.tpMarker.getLatLng();
+                  Markers.updatePosition(pos);
+                  console.log(pos.lat,pos.lng,);
+                  // Send teleport coordinates to UE4
+                  ue4("teleport", {
+                    lat: pos.lat,
+                    lng: pos.lng,
+                    alt: newAlt
+                  });
+                  // Remove the TP marker from the map and clear the reference
+                  state.map.removeLayer(state.tpMarker);
+                  state.tpMarker = null;
+                }
+              };
+
+              state.tpMarker.bindPopup(popupContent).openPopup();
+            }
+          },
+        };
+
+        // Marker handlers
+        const Markers = {
+          createArrowMarker(latlng, rot_z, isMyMarker = false) {
+            const size = isMyMarker ? 40 : 20;
+            const fontSize = isMyMarker ? 40 : 20;
+            const anchor = isMyMarker ? 20 : 10;
+
+            const arrowIcon = L.divIcon({
+              html: `<div class="arrow-marker" style="transform: rotate(${
+                rot_z - 90
+              }deg); font-size: ${fontSize}px;">➤</div>`,
+              className: "",
+              iconSize: [size, size],
+              iconAnchor: [anchor, anchor],
+            });
+
+            return L.marker(latlng, { icon: arrowIcon });
+          },
+
+          updatePosition(latlng, zrot) {
+            const { lat, lng } = latlng;
+
+            if (state.myMarker) {
+              const prevPos = state.myMarker.getLatLng();
+              if (prevPos.lat !== lat || prevPos.lng !== lng) {
+                state.rot_z = this.calculateBearing(
+                  prevPos.lat,
+                  prevPos.lng,
+                  lat,
+                  lng,
+                );
+
+                state.myMarker.slideTo([lat, lng], {
+                  duration: CONFIG.MAP.SLIDE_DURATION,
+                  keepAtCenter: false,
+                });
+                const element = state.myMarker.getElement();
+                if (element) {
+                  const arrowMarker = element.querySelector(".arrow-marker");
+                  if (arrowMarker) {
+                    arrowMarker.style.transform = `rotate(${
+                      zrot 
+                    }deg)`;
+                  }
+                }
+              }
+            } else {
+              state.myMarker = this.createArrowMarker(
+                [lat, lng],
+                state.rot_z,
+                true,
+              ).addTo(state.map);
+            }
+
+            if (state.myCircle) {
+              state.myCircle.setLatLng([lat, lng]);
+            } else {
+              state.myCircle = L.circle([lat, lng], {
+                radius: CONFIG.MAP.CIRCLE_RADIUS,
+              }).addTo(state.map);
+            }
+
+            WSClient.send({
+              event_name: "GAMESERVER_CLIENT_UPDATE_STATE",
+              to: "others",
+              payload: {
+                lat: lat,
+                long: lng,
+                alt: state.alt,
+                rot_x: 0.5,
+                rot_y: 0.5,
+                rot_z: state.rot_z,
+                type: 1,
+                anim: 0,
+              },
+            });
+          },
+
+          calculateBearing(lat1, lon1, lat2, lon2) {
+            const toRad = (deg) => (deg * Math.PI) / 180;
+            const toDeg = (rad) => (rad * 180) / Math.PI;
+
+            const φ1 = toRad(lat1);
+            const φ2 = toRad(lat2);
+            const λ1 = toRad(lon1);
+            const λ2 = toRad(lon2);
+
+            const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
+            const x =
+              Math.cos(φ1) * Math.sin(φ2) -
+              Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
+
+            let bearing = toDeg(Math.atan2(y, x));
+            bearing = (bearing + 360) % 360;
+
+            return bearing;
+          },
+
+          updateNearbyClients(clients) {
+            const currentClientIds = new Set(
+              clients.map((client) => client.client_id),
+            );
+
+            // Update client list UI
+            const clientList = document.getElementById("clientList");
+            clientList.innerHTML = clients
+              .map((client) => {
+                const {
+                  name,
+                  lat,
+                  long,
+                  alt,
+                  rot_x,
+                  rot_y,
+                  rot_z,
+                  type,
+                  anim,
+                } = client;
+
+                // Determine the emoticon based on the type
+                let emoticon = "";
+                switch (type) {
+                  case 0:
+                    emoticon = "🪂";
+                    break;
+                  case 1:
+                    emoticon = "🛩️";
+                    break;
+                  case 2:
+                    emoticon = "🐲";
+                    break;
+                  case 3:
+                    emoticon = "🕊️";
+                    break;
+                  default:
+                    emoticon = "";
+                }
+
+                return `
+                  <div class="client-item">
+                    <div class="client-name">${emoticon} ${
+                      name || "Unknown"
+                    } ${anim}</div>
+                    <div class="client-details">
+                      <div>
+                        Lat/Lng:<br>
+                        Alt:<br>
+                        Rot:
+                      </div>
+                      <div>
+                        ${
+                          lat !== undefined && long !== undefined
+                            ? `${lat.toFixed(4)}/${long.toFixed(4)}<br>`
+                            : "N/A/N/A<br>"
+                        }
+                        ${alt || "N/A"}m<br>
+                        ${rot_x !== undefined ? rot_x.toFixed(2) : "N/A"}/${
+                          rot_y !== undefined ? rot_y.toFixed(2) : "N/A"
+                        }/${rot_z !== undefined ? rot_z.toFixed(2) : "N/A"}
+                      </div>
+                    </div>
+                  </div>
+                `;
+              })
+              .join("");
+
+            // Remove old markers
+            Object.keys(state.markers).forEach((clientId) => {
+              if (!currentClientIds.has(clientId)) {
+                state.map.removeLayer(state.markers[clientId]);
+                delete state.markers[clientId];
+              }
+            });
+
+            // Update markers
+            clients.forEach((client) => {
+              const { client_id, name, lat, long, rot_z } = client;
+              if (lat && long && name) {
+                if (state.markers[client_id]) {
+                  const marker = state.markers[client_id];
+                  marker.slideTo([lat, long], {
+                    duration: CONFIG.MAP.SLIDE_DURATION,
+                    keepAtCenter: false,
+                  });
+
+                  const element = marker.getElement();
+                  if (element) {
+                    const arrowMarker = element.querySelector(".arrow-marker");
+                    if (arrowMarker) {
+                      arrowMarker.style.transform = `rotate(${rot_z}deg)`;
+                    }
+                  }
+                  marker.setTooltipContent(name);
+                } else {
+                  state.markers[client_id] = this.createArrowMarker(
+                    [lat, long],
+                    rot_z,
+                  )
+                    .bindTooltip(name, {
+                      permanent: true,
+                      direction: "right",
+                      offset: [20, 0],
+                      opacity: 0.7,
+                    })
+                    .addTo(state.map);
+                }
+              }
+            });
+          },
+        };
+
+
+        // UE4 Connection
+        "object" != typeof ue || "object" != typeof ue.interface
+          ? ("object" != typeof ue && (ue = {}),
+            (ue.interface = {}),
+            (ue.interface.broadcast = function (e, t) {
+              if ("string" == typeof e) {
+                var o = [e, ""];
+                void 0 !== t && (o[1] = t);
+                var n = encodeURIComponent(JSON.stringify(o));
+                "object" == typeof history &&
+                "function" == typeof history.pushState
+                  ? (history.pushState({}, "", "#" + n),
+                    history.pushState({}, "", "#" + encodeURIComponent("[]")))
+                  : ((document.location.hash = n),
+                    (document.location.hash = encodeURIComponent("[]")));
+              }
+            }))
+          : (function (e) {
+              (ue.interface = {}),
+                (ue.interface.broadcast = function (t, o) {
+                  "string" == typeof t &&
+                    (void 0 !== o
+                      ? e.broadcast(t, JSON.stringify(o))
+                      : e.broadcast(t, ""));
+                });
+            })(ue.interface),
+          (ue4 = ue.interface.broadcast);
+
+        ue.interface.coords = function (data) {
+          x = JSON.parse(data);
+          //console.log(x);
+
+          Markers.updatePosition({ lat: x.lat, lng: x.lon }, x.rot_z);
+          state.alt = x.alt;
+/*
+          const altInput = document.getElementById("altInput");
+          if (altInput) {
+            altInput.value = x.alt;
+          }
+
+*/
+          WSClient.send({
+            event_name: "GAMESERVER_CLIENT_UPDATE_STATE",
+            to: "others",
+            payload: {
+              lat: x.lat,
+              long: x.lon,
+              alt: x.alt,
+              rot_x: x.rot_x,
+              rot_y: x.rot_y,
+              rot_z: x.rot_z,
+              type: x.type,
+              anim: x.anim,
+            },
+          });
+        };
+
+
+
+        // Initialize application
+        window.onload = () => {
+          Map.init();
+          WSClient.connect();
+          UI.initEventListeners();
+        };
+      })();
+    </script>
+  </body>
+</html>

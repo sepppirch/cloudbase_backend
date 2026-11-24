@@ -1,0 +1,18 @@
+{
+    "valleywind": false,
+    "wind": true,
+    "windcount": 200,
+    "buildings": true,
+    "instmesh": true,
+    "instmeshcollision": true,
+    "labelsPeaks": true,
+    "labelsPlayers": true,
+    "tracksPlayers": false,
+    "nigaraClouds": true,
+    "traffic": true,
+    "clouddist": 500000,
+    "vcloud": 1,
+    "server":"https://cloudbase.lab.lbi-netmed.com/",
+    "commandslow":["sg.ShadowQuality 0","sg.AntiAliasingQuality 0","r.MaterialQualityLevel 0","grass.Enable 0"],
+    "commands":["sg.ShadowQuality 3","sg.AntiAliasingQuality 3","r.MaterialQualityLevel 4","grass.CullDistanceScale 3","grass.densityScale 5", "r.LandscapeLODDistributionScale 1.5", "stat.FPS"]
+}

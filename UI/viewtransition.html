@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Glider Race Animated List</title>
+
+  <style>
+    /* Body and general styles */
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+
+    /* List styles */
+    ul#raceList {
+      list-style: none;
+      padding: 5px;
+      margin: 0;
+      width: 120px;
+      opacity: 0.8;
+
+      /* Fix to top-right corner */
+      position: fixed;
+      top: 5px;
+      right: 5px;
+
+      /* Optional: slight shadow */
+
+    }
+
+    li {
+      display: flex;
+      justify-content: space-between;
+      /* name+altitude left, flag right */
+      align-items: center;
+      padding: 3px;
+      padding-left: 7px;
+      margin: 6px 0;
+      border-radius: 8px;
+      position: relative;
+      will-change: transform;
+      color: white;
+      font-weight: medium;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+
+    }
+
+    .info {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .nameText {
+      font-size: 10px;
+    }
+
+    .altitudeText {
+      font-size: 6px;
+      opacity: 0.8;
+    }
+
+    .flagImg {
+      width: 20px;
+      height: 14px;
+      object-fit: cover;
+      margin-right: 0px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+
+<body>
+
+  <ul id="raceList"></ul>
+
+  <script>
+    const rgb2hex = (r, g, b) => {
+        return '#' +
+            (
+                (1 << 24) +
+                (r << 16) +
+                (g << 8) +
+                b
+            )
+            .toString(16).slice(1);
+    };
+
+    /// UE4 connection
+
+    "object" != typeof ue || "object" != typeof ue.interface ? ("object" != typeof ue && (ue = {}), ue.interface = {}, ue.interface.broadcast = function (e, t) {
+      if ("string" == typeof e) {
+        var o = [e, ""];
+        void 0 !== t && (o[1] = t);
+        var n = encodeURIComponent(JSON.stringify(o));
+        "object" == typeof history && "function" == typeof history.pushState ? (history.pushState({}, "", "#" + n), history.pushState({}, "", "#" + encodeURIComponent("[]"))) : (document.location.hash = n, document.location.hash = encodeURIComponent("[]"))
+      }
+    }) : function (e) {
+      ue.interface = {},
+        ue.interface.broadcast = function (t, o) {
+          "string" == typeof t && (void 0 !== o ? e.broadcast(t, JSON.stringify(o)) : e.broadcast(t, ""))
+        }
+    }
+
+
+      (ue.interface), (ue4 = ue.interface.broadcast);
+
+
+    let pilots = [];
+    let gliders = [];
+    let initialized = false;
+    let lastglidercount = 0;
+
+    ue.interface.ranking = function (data) {
+
+
+      console.log(data);
+      pilots = data["ghosts"];
+
+      //refresh list if new player appears (livetracking)
+      if (lastglidercount !== pilots.length){
+        initialized = false;
+        lastglidercount = pilots.length;
+        var foo = document.getElementById('raceList');
+        while (foo.firstChild) foo.removeChild(foo.firstChild);
+      }
+
+
+      gliders = [];
+      for (let i = 0; i < pilots.length; i++) {
+        col = rgb2hex(pilots[i]["r"], pilots[i]["g"] ,pilots[i]["b"]);
+        //console.log(col);
+        var thispilot = { name: pilots[i]["name"], color: col, flagUrl: pilots[i]["flag"], altitude: pilots[i]["alt"], dist : pilots[i]["dist"] };
+        gliders.push(thispilot);
+      };
+      //console.log(data);
+
+      if (initialized == false) {
+        initList(gliders);
+        initialized = true;
+      } else {
+        try{
+          reorderList(gliders);
+        }
+        catch(error){
+          console.log(error);
+          console.log(data);
+        }
+        
+      }
+      //const newOrder = gliders;
+
+    }
+
+
+
+
+
+
+
+
+    const list = document.getElementById("raceList");
+
+
+
+
+
+    // Create LI elements once
+    function initList() {
+      gliders.forEach(g => {
+        const li = document.createElement("li");
+        li.dataset.id = g.name;
+        li.dataset.color = g.color;
+        li.dataset.info = g.name+g.color;
+        li.dataset.flagUrl = g.flagUrl;
+        li.dataset.altitude = g.altitude;
+        li.dataset.dist = g.dist;
+
+        // Info container (name + altitude)
+        const info = document.createElement("div");
+        info.className = "info";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "nameText";
+        nameSpan.textContent = g.name; // rank added dynamically
+        info.appendChild(nameSpan);
+
+        const altitudeSpan = document.createElement("span");
+        altitudeSpan.className = "altitudeText";
+        altitudeSpan.textContent = `${g.altitude} m`;
+        info.appendChild(altitudeSpan);
+
+        li.appendChild(info);
+
+        // Flag image
+        const flagImg = document.createElement("img");
+        flagImg.className = "flagImg";
+        flagImg.src = g.flagUrl;
+        flagImg.alt = g.name + " flag";
+        li.appendChild(flagImg);
+
+        li.style.backgroundColor = g.color;
+        list.appendChild(li);
+      });
+    }
+    // ----------------------------------------------------
+    // Spring animation for transform
+    // ----------------------------------------------------
+    function springTo(element, fromY, toY) {
+      let y = fromY;
+      let v = 0;
+      const stiffness = 0.2;
+      const damping = 0.52;
+
+      function animate() {
+        const force = -(y - toY) * stiffness;
+        v += force;
+        v *= (1 - damping);
+        y += v;
+
+        element.style.transform = `translateY(${y}px)`;
+
+        if (Math.abs(v) > 0.1 || Math.abs(y - toY) > 0.5) {
+          requestAnimationFrame(animate);
+        } else {
+          element.style.transform = "";
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    // ----------------------------------------------------
+    // FLIP + Spring + Ranks + Altitude + Flag Images
+    // ----------------------------------------------------
+    function reorderList(newOrder) {
+      const items = [...list.children];
+
+      // First positions li.dataset.id,
+      const firstRects = new Map();
+      items.forEach(li => firstRects.set(li.dataset.info, li.getBoundingClientRect()));
+
+      // Reorder DOM nodes
+      newOrder.forEach(name => {
+        const li = items.find(x => x.dataset.info === name["name"]+name["color"]);
+        if (typeof li =="object"){
+        //const li = items.find(x => x.dataset.info === name["name"]);
+        const li = items.find(x => x.dataset.info === name["name"]+name["color"]);
+        //console.log(typeof li);
+        //console.log(li);
+        list.appendChild(li);
+        }
+      });
+
+      // Animate + update ranks and altitude
+      const reorderedItems = [...list.children];
+      reorderedItems.forEach((li, index) => {
+        const first = firstRects.get(li.dataset.info);
+        const last = li.getBoundingClientRect();
+        const dy = first.top - last.top;
+
+        springTo(li, dy, 0);
+
+        // Update name with rank
+        const nameSpan = li.querySelector(".nameText");
+        nameSpan.textContent = `${index + 1}. ${li.dataset.id}`;
+
+        // Update altitude
+        const altitudeSpan = li.querySelector(".altitudeText");
+        altitudeSpan.textContent = gliders[index].altitude+" m  "+ (parseFloat(gliders[index].dist)/1000).toFixed(2) +" -> GOAL";
+        //console.log(li.dataset.altitude);
+        // Keep background color
+        li.style.backgroundColor = gliders.find(g => g.name + g.color === li.dataset.info).color;
+      });
+    }
+
+    // ----------------------------------------------------
+    // Shuffle helper and random altitude change
+    // ----------------------------------------------------
+    function shuffle(arr) {
+      /*
+      const a = [...arr];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+        */
+      return gliders;
+    }
+
+
+
+    // ----------------------------------------------------
+    // Auto-shuffle every 3 seconds
+    // ----------------------------------------------------
+    //setInterval(() => {
+    //randomAltitude(); // update altitude
+    //const newOrder = [...gliders].sort((a, b) => b.altitude - a.altitude).map(g => g.name);
+    //reorderList(newOrder);
+    //}, 3000);
+  </script>
+
+</body>
+
+</html>
